@@ -1530,6 +1530,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                 'p_scheduled_date': parsedResult.scheduledDate,
                                 'p_week_start_date':
                                     _formatDateToKey(derivedWeekStart),
+                                'p_task_mode': activeMode,
                                 'p_task_time': parsedResult.taskTime,
                                 'p_duration_minutes':
                                     parsedResult.durationMinutes,
@@ -1758,7 +1759,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                         const Text('Son Teslim (Deadline):',
                             style: TextStyle(fontWeight: FontWeight.bold)),
                         Row(
-                          mainAxisSize: MainAxisSize.min,
+                          mainAxisSize: dynamic;
                           children: [
                             OutlinedButton.icon(
                               icon: const Icon(Icons.event_available, size: 18),
@@ -2252,7 +2253,6 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                 final derivedDayIndex = targetDate.weekday - 1;
 
                                 try {
-                                  // P0-01: Yalnızca tek kapı atomik RPC üzerinden görev eklenir.
                                   final rpcRes = await supabase.rpc(
                                     'create_task_with_outbox',
                                     params: {
@@ -2577,6 +2577,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
     );
   }
 
+  // P1-10 DÜZELTMESİ: Tamamlanan görev için bildirim iptali, geri alınırsa yeniden kurma
   void _updateTaskCompletion(TaskItem task, bool isCompleted) async {
     final previousState = task.isCompleted;
     final scaffoldMessenger = ScaffoldMessenger.of(context);
@@ -2603,6 +2604,21 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
 
       if (res is Map && res['success'] == true) {
         task.version = res['version'] ?? (task.version + 1);
+
+        // Bildirim senkronizasyonunu anında yönet
+        final notifId = NotificationService.resolveNotificationId(task: task);
+        if (isCompleted) {
+          // Görev tamamlandıysa yaklaşan bildirimi hemen iptal et
+          await NotificationService.cancelNotification(notifId);
+        } else {
+          // Görev tekrar açıldıysa ve gelecekteyse bildirimi yeniden planla
+          final targetDate =
+              DateTime.tryParse(task.scheduledDate ?? '') ?? DateTime.now();
+          TaskSyncCoordinator.coordinateTaskSync(
+            task: task,
+            targetDate: targetDate,
+          );
+        }
       }
     } catch (_) {
       if (mounted) {
