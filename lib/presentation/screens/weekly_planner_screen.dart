@@ -701,7 +701,6 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
     );
   }
 
-  // P1-05 & P1-07 DÜZELTMESİ: Kota hatasında otomatik refund (iade) garantisi
   void _showAIAnalysisModal() async {
     final scaffoldMessenger = ScaffoldMessenger.of(context);
     final user = supabase.auth.currentUser;
@@ -748,7 +747,6 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
       }
     }
 
-    // Rapor oluşturma ve hata durumunda kotayı iade etme güvencesi
     Map<String, dynamic> report;
     try {
       report = PlanningEngine.generateWeeklyIntelligenceReport(allFetchedTasks);
@@ -756,10 +754,15 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
       debugPrint("Rapor Üretim Hatası, kota iade ediliyor: $engineError");
       if (!isUserPremium) {
         try {
-          await supabase
-              .rpc('refund_ai_quota', params: {'p_request_id': requestId});
-          if (mounted) {
-            setState(() => aiUsage = (aiUsage > 0) ? aiUsage - 1 : 0);
+          final dynamic refundRes = await supabase.rpc(
+            'refund_ai_quota',
+            params: {'p_request_id': requestId},
+          );
+          if (refundRes is Map && refundRes['success'] == true && mounted) {
+            setState(() {
+              aiUsage =
+                  refundRes['ai_usage'] ?? ((aiUsage > 0) ? aiUsage - 1 : 0);
+            });
           }
         } catch (_) {}
       }
