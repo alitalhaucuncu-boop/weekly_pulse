@@ -11,27 +11,29 @@ android {
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
+        isCoreLibraryDesugaringEnabled = true
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
 
     defaultConfig {
-        // TODO: Projenizin benzersiz uygulama kimliğini buraya yazın
         applicationId = "com.example.weekly_pulse"
-        
-        // Ses tanıma, takvim ve bildirim izinlerinin çökmesini engellemek için minSdk 23 olarak kilitlendi:
         minSdk = 23
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        multiDexEnabled = true
     }
 
     buildTypes {
         release {
-            // RELEASE MODU İÇİN İMZALAMA AYARLARI
             signingConfig = signingConfigs.getByName("debug")
         }
     }
+}
+
+dependencies {
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
 }
 
 kotlin {
