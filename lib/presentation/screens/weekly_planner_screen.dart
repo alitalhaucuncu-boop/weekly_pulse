@@ -57,6 +57,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
   DateTime selectedCalendarDay = DateTime.now();
 
   bool _isLoadingTasks = true;
+  bool _isAIAnalyzing = false; // P1-08 Double-Submit Guard
   String? _taskFetchError;
   final Set<String> _movingTaskIds = <String>{};
 
@@ -701,10 +702,17 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
     );
   }
 
+  // P1-08: Double-Submit / Loading Guard Korumalı Analiz Akışı
   void _showAIAnalysisModal() async {
+    if (_isAIAnalyzing) return; // Mükerrer tıklamayı engelle
+    setState(() => _isAIAnalyzing = true);
+
     final scaffoldMessenger = ScaffoldMessenger.of(context);
     final user = supabase.auth.currentUser;
-    if (user == null) return;
+    if (user == null) {
+      setState(() => _isAIAnalyzing = false);
+      return;
+    }
 
     final String requestId =
         "ai_${user.id}_${DateTime.now().millisecondsSinceEpoch}";
@@ -720,6 +728,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
       if (quotaRes is! Map || quotaRes['success'] != true) {
         final message = (quotaRes is Map) ? quotaRes['message'] : null;
         if (!mounted) {
+          setState(() => _isAIAnalyzing = false);
           return;
         }
         _showLimitExceededDialog(
@@ -727,6 +736,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
           message: message ??
               'Ücretsiz sürümde haftada 1 kez Akıllı Analiz alabilirsin.',
         );
+        setState(() => _isAIAnalyzing = false);
         return;
       }
       if (mounted) {
@@ -743,6 +753,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
             const SnackBar(content: Text('Kota doğrulanamadı.')),
           );
         }
+        setState(() => _isAIAnalyzing = false);
         return;
       }
     }
@@ -772,8 +783,11 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
               content: Text('Rapor oluşturulamadı, hakkınız iade edildi.')),
         );
       }
+      setState(() => _isAIAnalyzing = false);
       return;
     }
+
+    setState(() => _isAIAnalyzing = false);
 
     if (!mounted) {
       return;
@@ -2999,7 +3013,8 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                         children: [
                           Expanded(
                             child: InkWell(
-                              onTap: _showAIAnalysisModal,
+                              onTap:
+                                  _isAIAnalyzing ? null : _showAIAnalysisModal,
                               borderRadius: BorderRadius.circular(16),
                               child: Container(
                                 padding: const EdgeInsets.all(12),
@@ -3017,18 +3032,27 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                 ),
                                 child: Row(
                                   children: [
-                                    Icon(
-                                        isUserPremium
-                                            ? Icons.stars
-                                            : Icons.auto_awesome,
-                                        color: Colors.amber,
-                                        size: 26),
+                                    _isAIAnalyzing
+                                        ? const SizedBox(
+                                            width: 22,
+                                            height: 22,
+                                            child: CircularProgressIndicator(
+                                                color: Colors.white,
+                                                strokeWidth: 2))
+                                        : Icon(
+                                            isUserPremium
+                                                ? Icons.stars
+                                                : Icons.auto_awesome,
+                                            color: Colors.amber,
+                                            size: 26),
                                     const SizedBox(width: 8),
                                     Expanded(
                                       child: Text(
-                                        isUserPremium
-                                            ? 'Weekly Intelligence VIP'
-                                            : 'Akıllı Haftalık Yaşam Raporu',
+                                        _isAIAnalyzing
+                                            ? 'Analiz Ediliyor...'
+                                            : (isUserPremium
+                                                ? 'Weekly Intelligence VIP'
+                                                : 'Akıllı Haftalık Yaşam Raporu'),
                                         style: const TextStyle(
                                             color: Colors.white,
                                             fontWeight: FontWeight.bold,

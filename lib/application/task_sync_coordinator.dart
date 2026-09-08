@@ -111,7 +111,7 @@ class TaskSyncCoordinator {
 
     task.syncStatus = syncStatus;
 
-    // 4. Metadata Güncellemesi: P1-08 Sıfır Satır (Conflict) ile Ağ Hatasını Ayırma
+    // 4. Metadata Güncellemesi
     try {
       final user = supabase.auth.currentUser;
       if (user != null && task.id.isNotEmpty) {
@@ -162,11 +162,53 @@ class TaskSyncCoordinator {
     );
   }
 
+  // P1-05 & P1-06: Hem haftalık görevleri hem de silinmiş görevlerin dış temizlik outbox kayıtlarını doğrudan işleme
   static Future<int> reconcilePendingAndFailedTasks() async {
     final user = supabase.auth.currentUser;
     if (user == null) return 0;
 
     int reconciledCount = 0;
+
+    // 1. Silinmiş görevlerin kalıcı dış temizlik kayıtlarını doğrudan outbox tablosundan claim et
+    try {
+      final deleteOps = await supabase
+          .from('sync_operations')
+          .select()
+          .eq('user_id', user.id)
+          .eq('operation_type', 'delete')
+          .eq('status', 'pending')
+          .limit(10);
+
+      for (var op in deleteOps) {
+        final desired = op['desired_state'] as Map<String, dynamic>?;
+        if (desired != null) {
+          final notifId = desired['notification_id'] as int?;
+          final calId = desired['calendar_id'] as String?;
+          final eventId = desired['calendar_event_id'] as String?;
+
+          if (notifId != null) {
+            try {
+              await NotificationService.cancelNotification(notifId);
+            } catch (_) {}
+          }
+          if (calId != null && eventId != null) {
+            try {
+              await CalendarService.deleteEvent(calId, eventId);
+            } catch (_) {}
+          }
+
+          await supabase.from('sync_operations').update({
+            'status': 'completed',
+            'updated_at': DateTime.now().toUtc().toIso8601String()
+          }).eq('id', op['id']);
+          reconciledCount++;
+        }
+      }
+    } catch (e) {
+      debugPrint("Durable Delete Outbox Worker Hatası: $e");
+    }
+
+    // 2. Mevcut görevlerin bekleyen eşitlenmelerini tamamla
     try {
       final res = await supabase
           .from('weekly_tasks')
