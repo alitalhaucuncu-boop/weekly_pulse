@@ -4,19 +4,21 @@ import '../../domain/models/task_item.dart';
 import '../../data/notification_service.dart';
 import '../../data/calendar_service.dart';
 
+enum CalendarSyncStatus { synced, skippedByUser, unavailable, failed }
+
 class TaskSyncResult {
   final bool isFullySynced;
   final String? effectiveUserMessage;
   final bool notificationSuccess;
-  final bool calendarSuccess;
-  final bool calendarSkipped;
+  final CalendarSyncStatus calendarStatus;
+  final bool isVersionConflict;
 
   const TaskSyncResult({
     required this.isFullySynced,
     this.effectiveUserMessage,
     required this.notificationSuccess,
-    required this.calendarSuccess,
-    this.calendarSkipped = false,
+    required this.calendarStatus,
+    this.isVersionConflict = false,
   });
 }
 
@@ -29,12 +31,12 @@ class TaskSyncCoordinator {
     required DateTime targetDate,
   }) async {
     bool notifSuccess = false;
-    bool calSuccess = false;
-    bool calSkipped = false;
+    CalendarSyncStatus calStatus = CalendarSyncStatus.unavailable;
     String? notifError;
     String? calError;
+    bool isConflict = false;
 
-    // 1. Bildirim Senkronizasyonu & ID Atama (P0-01)[cite: 2]
+    // 1. Bildirim Senkronizasyonu & Kalıcı ID Atama
     final int resolvedNotifId =
         NotificationService.resolveNotificationId(task: task);
     task.notificationId = resolvedNotifId;
@@ -66,63 +68,62 @@ class TaskSyncCoordinator {
       } catch (_) {}
     }
 
-    // 2. Takvim Entegrasyonu: CalendarService API Sözleşmesine Tam Uyum
+    // 2. Takvim Entegrasyonu: CalendarService API Uyumlu Çağrı (calendarId named parameter hatası giderildi)
     try {
       final calId = await CalendarService.getDefaultCalendarId();
-      if (calId != null && calId.isNotEmpty) {
+      if (calId == null || calId.isEmpty) {
+        calStatus = CalendarSyncStatus.skippedByUser;
+      } else {
         task.calendarId = calId;
 
-        // CalendarService.addOrUpdateEvent çağrısı (calendarId adlandırması olmadan)
         dynamic eventResult;
         try {
-          // Doğrudan task ve targetDate ile çağırma
+          // Positional çağrı denemesi: addOrUpdateEvent(calendarId, task, targetDate)
           eventResult = await (CalendarService.addOrUpdateEvent as dynamic)(
-            task: task,
-            targetDate: targetDate,
+            calId,
+            task,
+            targetDate,
           );
         } catch (_) {
           try {
-            // Positional calId ile çağırma fallback'i
+            // Named task & targetDate çağrısı denemesi
             eventResult = await (CalendarService.addOrUpdateEvent as dynamic)(
-              calId,
-              task,
-              targetDate,
+              task: task,
+              targetDate: targetDate,
             );
-          } catch (_) {
+          } catch (e) {
             eventResult = null;
+            calError = e.toString();
           }
         }
 
-        if (eventResult != null) {
+        if (eventResult != null && eventResult.toString().isNotEmpty) {
           task.calendarEventId = eventResult.toString();
-          calSuccess = true;
+          calStatus = CalendarSyncStatus.synced;
         } else {
-          calSkipped = true;
-          calSuccess =
-              true; // Takvim opsiyonel capability olarak kabul edilir[cite: 2]
+          calStatus = CalendarSyncStatus.failed;
+          calError ??= 'Takvim etkinliği oluşturulamadı.';
         }
-      } else {
-        calSkipped = true;
-        calSuccess = true;
       }
     } catch (e) {
-      debugPrint("Senkronizasyon Takvim Hatası: $e");
-      calSkipped = true;
-      calSuccess = true;
+      debugPrint("Takvim Entegrasyon Hatası: $e");
+      calStatus = CalendarSyncStatus.failed;
+      calError = 'Takvim hatası: $e';
     }
 
-    // 3. Genel Durum Değerlendirmesi[cite: 2]
-    final bool isAllSynced = notifSuccess && calSuccess;
-    final String syncStatus =
-        isAllSynced ? 'synced' : (notifSuccess ? 'synced' : 'failed');
+    // 3. Senkronizasyon Durumu Hesabı
+    final bool calOk = (calStatus == CalendarSyncStatus.synced ||
+        calStatus == CalendarSyncStatus.skippedByUser);
+    final bool isAllSynced = notifSuccess && calOk;
+    final String syncStatus = isAllSynced ? 'synced' : 'failed';
 
     task.syncStatus = syncStatus;
 
-    // 4. Metadata'yı Versiyon Koruması (Version Guard) ile Güncelle (P0-03)
+    // 4. Metadata Güncellemesi & Zero-Row Kontrolü
     try {
       final user = supabase.auth.currentUser;
       if (user != null && task.id.isNotEmpty) {
-        await supabase
+        final updateResponse = await supabase
             .from('weekly_tasks')
             .update({
               'notification_id': task.notificationId,
@@ -133,23 +134,33 @@ class TaskSyncCoordinator {
             })
             .eq('id', task.id)
             .eq('user_id', user.id)
-            .eq('version', task.version);
+            .eq('version', task.version)
+            .select('id')
+            .maybeSingle();
+
+        if (updateResponse == null) {
+          isConflict = true;
+          debugPrint(
+              "UYARI: Sync metadata zero-row update! Task version stale.");
+        }
       }
     } catch (e) {
       debugPrint("Sync Metadata Kayıt Hatası: $e");
     }
 
     String? userMsg;
-    if (!isAllSynced && !calSkipped) {
-      userMsg = notifError ?? calError ?? 'Senkronizasyon kısmi tamamlandı.';
+    if (isConflict) {
+      userMsg = 'Görev versiyonu eski, senkronizasyon askıya alındı.';
+    } else if (!isAllSynced) {
+      userMsg = notifError ?? calError ?? 'Senkronizasyon başarısız oldu.';
     }
 
     return TaskSyncResult(
-      isFullySynced: isAllSynced,
+      isFullySynced: isAllSynced && !isConflict,
       effectiveUserMessage: userMsg,
       notificationSuccess: notifSuccess,
-      calendarSuccess: calSuccess,
-      calendarSkipped: calSkipped,
+      calendarStatus: calStatus,
+      isVersionConflict: isConflict,
     );
   }
 
