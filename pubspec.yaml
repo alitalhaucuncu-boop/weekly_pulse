@@ -1,0 +1,41 @@
+name: weekly_pulse
+description: "WeeklyPulse - Kağıt Hissiyatında Akıllı Ajanda Uygulaması"
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.5.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # VERİTABANI VE AUTH
+  supabase_flutter: ^2.8.3
+
+  # BİLDİRİM VE SAAT DİLİMİ
+  flutter_local_notifications: ^18.0.1
+  timezone: ^0.9.4
+
+  # CİHAZ VE AYLIK TAKVİM KÜTÜPHANELERİ
+  device_calendar: ^4.3.2
+  table_calendar: ^3.1.2
+
+  # SESLİ KOMUT KÜTÜPHANESİ
+  speech_to_text: ^7.0.0
+
+  # EFEKT VE ANİMASYONLAR
+  confetti: ^0.8.0
+
+  # İKONLAR
+  cupertino_icons: ^1.0.8
+  shared_preferences: ^2.5.5
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
