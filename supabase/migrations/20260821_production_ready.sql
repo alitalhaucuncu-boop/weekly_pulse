@@ -1,7 +1,6 @@
--- WeeklyPulse Canonical Production Migration v11
--- Kapsam: Role-Based Explicit Grants, Outbox Archive, Unified Quota Ledger ve Composite Indexes
+-- WeeklyPulse Canonical Production Migration v12 (P0 Hotfix & Ledger Parity)
 
--- 1. KISITLAMALAR VE PROFİL ŞEMASI
+-- 1. TABLO KISITLAMALARI VE PROFİL
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'check_weekly_tasks_mode') THEN
@@ -19,7 +18,7 @@ END $$;
 
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS last_usage_week text;
 
--- 2. SYNC_OPERATIONS & ARŞİV TABLOSU (P1-04)
+-- 2. SYNC_OPERATIONS & ARŞİV TABLOSU
 CREATE TABLE IF NOT EXISTS public.sync_operations_archive (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     original_operation_id uuid NOT NULL,
@@ -77,7 +76,7 @@ WHERE idempotency_key IS NULL OR trim(idempotency_key) = '';
 
 ALTER TABLE public.sync_operations ALTER COLUMN idempotency_key SET NOT NULL;
 
--- Mükerrer kayıtları silmeden önce arşiv tablosuna aktar (Audit Trail)
+-- Mükerrer kayıtları arşivleyip temizle
 WITH ranked_ops AS (
     SELECT id, user_id, task_id, operation_type, idempotency_key, desired_state, status, attempt_count,
            ROW_NUMBER() OVER (
@@ -102,7 +101,6 @@ INSERT INTO public.sync_operations_archive (
 SELECT id, user_id, task_id, operation_type, idempotency_key, desired_state, status, attempt_count, 'duplicate_dedup_cleanup'
 FROM duplicates_to_archive;
 
--- Ardından mükerrerleri ana tablodan kaldır
 WITH ranked_ops AS (
     SELECT id,
            ROW_NUMBER() OVER (
@@ -142,7 +140,6 @@ ALTER TABLE public.sync_operations DROP CONSTRAINT IF EXISTS unique_user_outbox_
 ALTER TABLE public.sync_operations 
 ADD CONSTRAINT unique_user_outbox_key UNIQUE (user_id, idempotency_key);
 
--- RLS İzolasyonu
 ALTER TABLE public.sync_operations ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS "Users can only read their sync operations" ON public.sync_operations;
 DROP POLICY IF EXISTS "Users can manage their own sync operations" ON public.sync_operations;
@@ -153,7 +150,7 @@ ON public.sync_operations FOR SELECT
 TO authenticated
 USING (auth.uid() = user_id);
 
--- 3. UNIFIED QUOTA LEDGER (AI & VOICE ORTAK DEFTER) (P1-01)
+-- 3. UNIFIED QUOTA LEDGER
 CREATE TABLE IF NOT EXISTS public.user_quota_ledger (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
@@ -165,7 +162,6 @@ CREATE TABLE IF NOT EXISTS public.user_quota_ledger (
     CONSTRAINT unique_user_quota_request UNIQUE (user_id, quota_type, request_id)
 );
 
--- Kompozit İndeks (P1-02 Hızlı Tüketim Sayımı)
 CREATE INDEX IF NOT EXISTS idx_quota_ledger_lookup 
 ON public.user_quota_ledger (user_id, quota_type, period_key, status);
 
@@ -258,6 +254,7 @@ BEGIN
     RETURNING * INTO v_updated_task;
 
     v_idempotency_key := 'mutation_' || p_task_id::text || '_' || v_updated_task.version::text;
+    
     v_desired_state := jsonb_build_object(
         'task_id', p_task_id,
         'title', trim(p_title),
@@ -307,7 +304,7 @@ BEGIN
 END;
 $$;
 
--- create_voice_task_with_quota (Unified Ledger Destekli)
+-- create_voice_task_with_quota (P0 Voice Ledger Result Check Düzeltmesi)
 CREATE OR REPLACE FUNCTION public.create_voice_task_with_quota(
     p_request_id text,
     p_title text,
@@ -338,6 +335,7 @@ DECLARE
     v_consumed_voice integer;
     v_existing_task record;
     v_outbox_id uuid;
+    v_ledger_id uuid;
 BEGIN
     v_user_id := auth.uid();
     IF v_user_id IS NULL THEN
@@ -354,7 +352,7 @@ BEGIN
 
     v_current_period := to_char(now(), 'IYYY-IW');
 
-    -- 1. Önce profil satırını kilitle
+    -- 1. Profil satırını kilitle
     SELECT is_premium, last_usage_week 
     INTO v_is_premium, v_last_usage_week
     FROM public.profiles
@@ -375,7 +373,7 @@ BEGIN
         RETURN jsonb_build_object('success', true, 'task', to_jsonb(v_new_task), 'idempotent_replay', true);
     END IF;
 
-    -- 3. Rollover ve Ledger üzerinden kota kontrolü (P1-01)
+    -- 3. Rollover ve Ledger üzerinden kota kontrolü
     IF NOT v_is_premium THEN
         SELECT count(*) INTO v_consumed_voice 
         FROM public.user_quota_ledger 
@@ -464,15 +462,16 @@ BEGIN
         RAISE EXCEPTION 'Sesli görev outbox kaydı oluşturulamadı.';
     END IF;
 
-    -- Unified Ledger kaydı ekle
+    -- Unified Ledger kaydı ve P0: RETURNING id ile doğrulanmış kayıt
     INSERT INTO public.user_quota_ledger (
         user_id, quota_type, period_key, request_id, status, created_at
     ) VALUES (
         v_user_id, 'voice', v_current_period, p_request_id, 'consumed', now()
-    ) ON CONFLICT (user_id, quota_type, request_id) DO NOTHING;
+    ) ON CONFLICT (user_id, quota_type, request_id) DO NOTHING
+    RETURNING id INTO v_ledger_id;
 
-    -- Profil sayacını güncelle (Optimizasyon önbelleği)
-    IF NOT v_is_premium THEN
+    -- Profil sayacı yalnızca ledger kaydı gerçekten yazıldıysa güncellenir
+    IF NOT v_is_premium AND v_ledger_id IS NOT NULL THEN
         UPDATE public.profiles
         SET voice_usage = voice_usage + 1, last_usage_week = v_current_period
         WHERE id = v_user_id;
@@ -485,7 +484,7 @@ BEGIN
 END;
 $$;
 
--- consume_ai_quota (Unified Ledger Destekli)
+-- consume_ai_quota (P0: v_user_id Düzeltmesi)
 CREATE OR REPLACE FUNCTION public.consume_ai_quota(
     p_request_id text
 )
@@ -502,6 +501,7 @@ DECLARE
     v_current_period text;
     v_last_usage_week text;
     v_consumed_count integer;
+    v_ledger_id uuid;
 BEGIN
     v_user_id := auth.uid();
     IF v_user_id IS NULL THEN
@@ -559,13 +559,14 @@ BEGIN
         END IF;
     END IF;
 
+    -- P0 DÜZELTMESİ: İlk değer p_request_id yerine kesin olarak v_user_id
     INSERT INTO public.user_quota_ledger (
         user_id, quota_type, period_key, request_id, status, created_at
     ) VALUES (
-        p_request_id, 'ai', v_current_period, p_request_id, 'consumed', now()
-    );
+        v_user_id, 'ai', v_current_period, p_request_id, 'consumed', now()
+    ) RETURNING id INTO v_ledger_id;
 
-    IF NOT v_is_premium THEN
+    IF NOT v_is_premium AND v_ledger_id IS NOT NULL THEN
         UPDATE public.profiles
         SET ai_usage = ai_usage + 1
         WHERE id = v_user_id;
@@ -579,7 +580,7 @@ BEGIN
 END;
 $$;
 
--- refund_ai_quota (Unified Ledger Destekli)
+-- refund_ai_quota
 CREATE OR REPLACE FUNCTION public.refund_ai_quota(
     p_request_id text
 )
@@ -644,8 +645,7 @@ BEGIN
 END;
 $$;
 
--- 5. EXPLICIT ROLE-BASED ALLOWLIST (P0-01 Blanket Grant Kaldırıldı)
--- Tüm fonksiyonların public yetkisini kapat, YALNIZCA son kullanıcının çağırabileceği RPC'leri allowlist ile aç:
+-- 5. EXPLICIT ROLE-BASED ALLOWLIST
 REVOKE ALL ON FUNCTION public.save_task_mutation(uuid, text, text, integer, text, text, text, integer, text, timestamptz, text, boolean, integer) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.save_task_mutation(uuid, text, text, integer, text, text, text, integer, text, timestamptz, text, boolean, integer) TO authenticated;
 

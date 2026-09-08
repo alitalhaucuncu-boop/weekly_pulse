@@ -5280,7 +5280,7 @@ void main() {
     });
   });
 }
-name: Quality Gate
+name: Production Quality Gate
 
 on:
   push:
@@ -5289,9 +5289,9 @@ on:
     branches: [ main, master ]
 
 jobs:
-  quality_check:
+  validate:
+    name: Lint, Test & Release Build
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
 
@@ -5310,17 +5310,20 @@ jobs:
       - name: Install Dependencies
         run: flutter pub get
 
-      - name: Build Android APK
-        run: flutter build apk --debug
+      - name: Verify Code Formatting
+        run: dart format --output=none --set-exit-if-changed .
 
-      - name: Upload APK Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-debug-apk
-          path: build/app/outputs/flutter-apk/app-debug.apk-- WeeklyPulse Canonical Production Migration v10
--- Kapsam: Deterministik Backfill, Dar Kapsamlı Constraint Göçü, Kota Defteri ve Tam Yetkilendirme
+      - name: Static Code Analysis (Flutter Analyze)
+        run: flutter analyze --fatal-infos --fatal-warnings
 
--- 1. TABLO KISITLAMALARI
+      - name: Run Unit & Logic Tests
+        run: flutter test --coverage
+
+      - name: Build Android Release APK
+        run: flutter build apk --release-- WeeklyPulse Canonical Production Migration v11
+-- Kapsam: Role-Based Explicit Grants, Outbox Archive, Unified Quota Ledger ve Composite Indexes
+
+-- 1. KISITLAMALAR VE PROFİL ŞEMASI
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'check_weekly_tasks_mode') THEN
@@ -5338,7 +5341,28 @@ END $$;
 
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS last_usage_week text;
 
--- 2. SYNC_OPERATIONS ŞEMA & BACKFILL & DAR KAPSAMLI CONSTRAINT GÖÇÜ (P0-01 & P0-02)
+-- 2. SYNC_OPERATIONS & ARŞİV TABLOSU (P1-04)
+CREATE TABLE IF NOT EXISTS public.sync_operations_archive (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    original_operation_id uuid NOT NULL,
+    user_id uuid NOT NULL,
+    task_id uuid,
+    operation_type text NOT NULL,
+    idempotency_key text,
+    desired_state jsonb,
+    status text,
+    attempts integer,
+    archived_at timestamptz NOT NULL DEFAULT now(),
+    archive_reason text NOT NULL DEFAULT 'duplicate_resolution'
+);
+
+ALTER TABLE public.sync_operations_archive ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Users can only read own archived operations" ON public.sync_operations_archive;
+CREATE POLICY "Users can only read own archived operations"
+ON public.sync_operations_archive FOR SELECT
+TO authenticated
+USING (auth.uid() = user_id);
+
 CREATE TABLE IF NOT EXISTS public.sync_operations (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
@@ -5357,27 +5381,50 @@ CREATE TABLE IF NOT EXISTS public.sync_operations (
     updated_at timestamptz NOT NULL DEFAULT now()
 );
 
--- Eksik kolonları ekle
 ALTER TABLE public.sync_operations ADD COLUMN IF NOT EXISTS idempotency_key text;
 ALTER TABLE public.sync_operations ADD COLUMN IF NOT EXISTS desired_state jsonb NOT NULL DEFAULT '{}'::jsonb;
 ALTER TABLE public.sync_operations ADD COLUMN IF NOT EXISTS state_version integer NOT NULL DEFAULT 1;
 ALTER TABLE public.sync_operations ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'pending';
 
--- FK'yı SET NULL yap (Görev silindiğinde dış temizlik kaydı kaybolmaz)
+-- FK ON DELETE SET NULL
 ALTER TABLE public.sync_operations DROP CONSTRAINT IF EXISTS sync_operations_task_id_fkey;
 ALTER TABLE public.sync_operations 
 ADD CONSTRAINT sync_operations_task_id_fkey 
 FOREIGN KEY (task_id) REFERENCES public.weekly_tasks(id) ON DELETE SET NULL;
 
--- P0-01: Null/boş idempotency_key kayıtları için deterministik backfill
+-- Deterministik backfill
 UPDATE public.sync_operations 
 SET idempotency_key = 'legacy_op_' || id::text 
 WHERE idempotency_key IS NULL OR trim(idempotency_key) = '';
 
--- Kolonu zorunlu (NOT NULL) yap
 ALTER TABLE public.sync_operations ALTER COLUMN idempotency_key SET NOT NULL;
 
--- P1-02: Status öncelikli mükerrer temizliği (completed > processing > pending > failed)
+-- Mükerrer kayıtları silmeden önce arşiv tablosuna aktar (Audit Trail)
+WITH ranked_ops AS (
+    SELECT id, user_id, task_id, operation_type, idempotency_key, desired_state, status, attempt_count,
+           ROW_NUMBER() OVER (
+               PARTITION BY user_id, idempotency_key 
+               ORDER BY 
+                   CASE status 
+                       WHEN 'completed' THEN 1 
+                       WHEN 'processing' THEN 2 
+                       WHEN 'pending' THEN 3 
+                       ELSE 4 
+                   END,
+                   created_at ASC
+           ) as rn
+    FROM public.sync_operations
+),
+duplicates_to_archive AS (
+    SELECT * FROM ranked_ops WHERE rn > 1
+)
+INSERT INTO public.sync_operations_archive (
+    original_operation_id, user_id, task_id, operation_type, idempotency_key, desired_state, status, attempts, archive_reason
+)
+SELECT id, user_id, task_id, operation_type, idempotency_key, desired_state, status, attempt_count, 'duplicate_dedup_cleanup'
+FROM duplicates_to_archive;
+
+-- Ardından mükerrerleri ana tablodan kaldır
 WITH ranked_ops AS (
     SELECT id,
            ROW_NUMBER() OVER (
@@ -5396,7 +5443,7 @@ WITH ranked_ops AS (
 DELETE FROM public.sync_operations 
 WHERE id IN (SELECT id FROM ranked_ops WHERE rn > 1);
 
--- P0-02: YALNIZCA idempotency_key içeren UNIQUE constraint'leri hedefle ve kaldır
+-- Yalnızca idempotency_key içeren unique constraint'leri kaldır
 DO $$
 DECLARE
     r RECORD;
@@ -5413,7 +5460,6 @@ BEGIN
     END LOOP;
 END $$;
 
--- Kullanıcı kapsamlı kesin unique kuralı ekle
 ALTER TABLE public.sync_operations DROP CONSTRAINT IF EXISTS unique_user_outbox_key;
 ALTER TABLE public.sync_operations 
 ADD CONSTRAINT unique_user_outbox_key UNIQUE (user_id, idempotency_key);
@@ -5429,32 +5475,32 @@ ON public.sync_operations FOR SELECT
 TO authenticated
 USING (auth.uid() = user_id);
 
--- 3. AI QUOTA LEDGER & PERIOD DESTEĞİ (P0-03)
-CREATE TABLE IF NOT EXISTS public.ai_quota_logs (
+-- 3. UNIFIED QUOTA LEDGER (AI & VOICE ORTAK DEFTER) (P1-01)
+CREATE TABLE IF NOT EXISTS public.user_quota_ledger (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
-    request_id text NOT NULL,
+    quota_type text NOT NULL CHECK (quota_type IN ('ai', 'voice')),
     period_key text NOT NULL DEFAULT to_char(now(), 'IYYY-IW'),
-    status text NOT NULL DEFAULT 'consumed',
+    request_id text NOT NULL,
+    status text NOT NULL DEFAULT 'consumed' CHECK (status IN ('consumed', 'refunded')),
     created_at timestamptz NOT NULL DEFAULT now(),
-    CONSTRAINT unique_user_ai_request UNIQUE (user_id, request_id)
+    CONSTRAINT unique_user_quota_request UNIQUE (user_id, quota_type, request_id)
 );
 
-ALTER TABLE public.ai_quota_logs ADD COLUMN IF NOT EXISTS period_key text NOT NULL DEFAULT to_char(now(), 'IYYY-IW');
-ALTER TABLE public.ai_quota_logs ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'consumed';
-ALTER TABLE public.ai_quota_logs DROP CONSTRAINT IF EXISTS check_ai_log_status;
-ALTER TABLE public.ai_quota_logs ADD CONSTRAINT check_ai_log_status CHECK (status IN ('consumed', 'refunded'));
+-- Kompozit İndeks (P1-02 Hızlı Tüketim Sayımı)
+CREATE INDEX IF NOT EXISTS idx_quota_ledger_lookup 
+ON public.user_quota_ledger (user_id, quota_type, period_key, status);
 
-ALTER TABLE public.ai_quota_logs ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS "Users can read own ai quota logs" ON public.ai_quota_logs;
-CREATE POLICY "Users can read own ai quota logs"
-ON public.ai_quota_logs FOR SELECT
+ALTER TABLE public.user_quota_ledger ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Users can read own quota ledger" ON public.user_quota_ledger;
+CREATE POLICY "Users can read own quota ledger"
+ON public.user_quota_ledger FOR SELECT
 TO authenticated
 USING (auth.uid() = user_id);
 
 -- 4. CANONICAL RPC FONKSİYONLARI
 
--- save_task_mutation (P1-10: Tam Desired State Dahil)
+-- save_task_mutation
 CREATE OR REPLACE FUNCTION public.save_task_mutation(
     p_task_id uuid,
     p_title text,
@@ -5534,8 +5580,6 @@ BEGIN
     RETURNING * INTO v_updated_task;
 
     v_idempotency_key := 'mutation_' || p_task_id::text || '_' || v_updated_task.version::text;
-    
-    -- P1-10: Dış senkronizasyon için eksiksiz tam desired state
     v_desired_state := jsonb_build_object(
         'task_id', p_task_id,
         'title', trim(p_title),
@@ -5585,7 +5629,7 @@ BEGIN
 END;
 $$;
 
--- create_voice_task_with_quota
+-- create_voice_task_with_quota (Unified Ledger Destekli)
 CREATE OR REPLACE FUNCTION public.create_voice_task_with_quota(
     p_request_id text,
     p_title text,
@@ -5610,11 +5654,11 @@ DECLARE
     v_task_id uuid;
     v_new_task record;
     v_is_premium boolean;
-    v_voice_usage integer;
     v_effective_mode text;
-    v_existing_task record;
-    v_current_week text;
+    v_current_period text;
     v_last_usage_week text;
+    v_consumed_voice integer;
+    v_existing_task record;
     v_outbox_id uuid;
 BEGIN
     v_user_id := auth.uid();
@@ -5630,9 +5674,11 @@ BEGIN
         RETURN jsonb_build_object('success', false, 'code', 'INVALID_DURATION', 'message', 'Sesli görev süresi 15 ile 480 dakika arasında olmalıdır.');
     END IF;
 
-    -- 1. ÖNCE PROFİLİ KİLİTLE
-    SELECT is_premium, voice_usage, last_usage_week 
-    INTO v_is_premium, v_voice_usage, v_last_usage_week
+    v_current_period := to_char(now(), 'IYYY-IW');
+
+    -- 1. Önce profil satırını kilitle
+    SELECT is_premium, last_usage_week 
+    INTO v_is_premium, v_last_usage_week
     FROM public.profiles
     WHERE id = v_user_id
     FOR UPDATE;
@@ -5641,7 +5687,7 @@ BEGIN
         RETURN jsonb_build_object('success', false, 'message', 'Kullanıcı profili bulunamadı.');
     END IF;
 
-    -- 2. KİLİTTEN SONRA İDEMPOTENSİ KONTROLÜ
+    -- 2. Kilit sonrası idempotensi kontrolü
     SELECT * INTO v_existing_task 
     FROM public.sync_operations 
     WHERE user_id = v_user_id AND idempotency_key = p_request_id;
@@ -5651,17 +5697,18 @@ BEGIN
         RETURN jsonb_build_object('success', true, 'task', to_jsonb(v_new_task), 'idempotent_replay', true);
     END IF;
 
-    -- 3. HAFTALIK ROLLOVER
-    v_current_week := to_char(now(), 'IYYY-IW');
-    IF v_last_usage_week IS DISTINCT FROM v_current_week THEN
-        v_voice_usage := 0;
-        UPDATE public.profiles 
-        SET voice_usage = 0, ai_usage = 0, last_usage_week = v_current_week 
-        WHERE id = v_user_id;
-    END IF;
+    -- 3. Rollover ve Ledger üzerinden kota kontrolü (P1-01)
+    IF NOT v_is_premium THEN
+        SELECT count(*) INTO v_consumed_voice 
+        FROM public.user_quota_ledger 
+        WHERE user_id = v_user_id 
+          AND quota_type = 'voice' 
+          AND period_key = v_current_period 
+          AND status = 'consumed';
 
-    IF NOT v_is_premium AND v_voice_usage >= 3 THEN
-        RETURN jsonb_build_object('success', false, 'code', 'LIMIT_EXCEEDED', 'message', 'Haftalık sesli komut kotanız doldu.');
+        IF v_consumed_voice >= 3 THEN
+            RETURN jsonb_build_object('success', false, 'code', 'LIMIT_EXCEEDED', 'message', 'Haftalık sesli komut kotanız doldu.');
+        END IF;
     END IF;
 
     v_effective_mode := CASE WHEN p_task_mode = 'pro' THEN 'pro' ELSE 'student' END;
@@ -5739,9 +5786,17 @@ BEGIN
         RAISE EXCEPTION 'Sesli görev outbox kaydı oluşturulamadı.';
     END IF;
 
+    -- Unified Ledger kaydı ekle
+    INSERT INTO public.user_quota_ledger (
+        user_id, quota_type, period_key, request_id, status, created_at
+    ) VALUES (
+        v_user_id, 'voice', v_current_period, p_request_id, 'consumed', now()
+    ) ON CONFLICT (user_id, quota_type, request_id) DO NOTHING;
+
+    -- Profil sayacını güncelle (Optimizasyon önbelleği)
     IF NOT v_is_premium THEN
         UPDATE public.profiles
-        SET voice_usage = voice_usage + 1
+        SET voice_usage = voice_usage + 1, last_usage_week = v_current_period
         WHERE id = v_user_id;
     END IF;
 
@@ -5752,7 +5807,7 @@ BEGIN
 END;
 $$;
 
--- consume_ai_quota (P0-03: Period-Aware Ledger Kontrolü)
+-- consume_ai_quota (Unified Ledger Destekli)
 CREATE OR REPLACE FUNCTION public.consume_ai_quota(
     p_request_id text
 )
@@ -5781,7 +5836,6 @@ BEGIN
 
     v_current_period := to_char(now(), 'IYYY-IW');
 
-    -- 1. ÖNCE PROFİLİ KİLİTLE
     SELECT is_premium, ai_usage, last_usage_week 
     INTO v_is_premium, v_ai_usage, v_last_usage_week
     FROM public.profiles
@@ -5792,10 +5846,10 @@ BEGIN
         RETURN jsonb_build_object('success', false, 'message', 'Profil bulunamadı.');
     END IF;
 
-    -- 2. KİLİTTEN SONRA REQUEST İD KONTROLÜ (Tekil istek tekrarı)
+    -- Kilit sonrası istek tekrarı kontrolü
     SELECT * INTO v_existing_log 
-    FROM public.ai_quota_logs 
-    WHERE user_id = v_user_id AND request_id = p_request_id;
+    FROM public.user_quota_ledger 
+    WHERE user_id = v_user_id AND quota_type = 'ai' AND request_id = p_request_id;
 
     IF FOUND THEN
         RETURN jsonb_build_object(
@@ -5806,7 +5860,6 @@ BEGIN
         );
     END IF;
 
-    -- 3. HAFTALIK ROLLOVER (Profile Sayacı)
     IF v_last_usage_week IS DISTINCT FROM v_current_period THEN
         v_ai_usage := 0;
         UPDATE public.profiles 
@@ -5814,11 +5867,12 @@ BEGIN
         WHERE id = v_user_id;
     END IF;
 
-    -- 4. P0-03: LEDGER İLE PERIOD KOTA KONTROLÜ (Gerçek Tüketim Sayımı)
+    -- Unified Ledger ile period kotası kontrolü
     IF NOT v_is_premium THEN
         SELECT count(*) INTO v_consumed_count 
-        FROM public.ai_quota_logs 
+        FROM public.user_quota_ledger 
         WHERE user_id = v_user_id 
+          AND quota_type = 'ai'
           AND period_key = v_current_period 
           AND status = 'consumed';
 
@@ -5827,19 +5881,10 @@ BEGIN
         END IF;
     END IF;
 
-    -- 5. LEDGER'A YAZ
-    INSERT INTO public.ai_quota_logs (
-        request_id,
-        user_id,
-        period_key,
-        status,
-        created_at
+    INSERT INTO public.user_quota_ledger (
+        user_id, quota_type, period_key, request_id, status, created_at
     ) VALUES (
-        p_request_id,
-        v_user_id,
-        v_current_period,
-        'consumed',
-        now()
+        p_request_id, 'ai', v_current_period, p_request_id, 'consumed', now()
     );
 
     IF NOT v_is_premium THEN
@@ -5856,7 +5901,7 @@ BEGIN
 END;
 $$;
 
--- refund_ai_quota (P1-05: Kesin Status Semantiği)
+-- refund_ai_quota (Unified Ledger Destekli)
 CREATE OR REPLACE FUNCTION public.refund_ai_quota(
     p_request_id text
 )
@@ -5876,7 +5921,6 @@ BEGIN
         RETURN jsonb_build_object('success', false, 'code', 'UNAUTHORIZED', 'message', 'Oturum açılmamış.');
     END IF;
 
-    -- 1. DEADLOCK ÖNLEME: Önce profil kilitlenir
     SELECT is_premium, ai_usage INTO v_is_premium, v_usage 
     FROM public.profiles 
     WHERE id = v_user_id 
@@ -5886,17 +5930,15 @@ BEGIN
         RETURN jsonb_build_object('success', false, 'message', 'Kullanıcı profili bulunamadı.');
     END IF;
 
-    -- 2. LOG SATIRI KİLİTLENİR
     SELECT * INTO v_log
-    FROM public.ai_quota_logs
-    WHERE user_id = v_user_id AND request_id = p_request_id
+    FROM public.user_quota_ledger
+    WHERE user_id = v_user_id AND quota_type = 'ai' AND request_id = p_request_id
     FOR UPDATE;
 
     IF NOT FOUND THEN
         RETURN jsonb_build_object('success', false, 'code', 'NOT_FOUND', 'message', 'İade edilecek tüketim kaydı bulunamadı.');
     END IF;
 
-    -- P1-05: Kesin ayrım (refunded ise idempotent success, consumed dışında ise typed failure)
     IF v_log.status = 'refunded' THEN
         RETURN jsonb_build_object('success', true, 'ai_usage', v_usage, 'message', 'Bu istek zaten iade edilmiş.');
     ELSIF v_log.status <> 'consumed' THEN
@@ -5912,9 +5954,9 @@ BEGIN
         v_usage := 0;
     END IF;
 
-    UPDATE public.ai_quota_logs
+    UPDATE public.user_quota_ledger
     SET status = 'refunded'
-    WHERE user_id = v_user_id AND request_id = p_request_id;
+    WHERE user_id = v_user_id AND quota_type = 'ai' AND request_id = p_request_id;
 
     RETURN jsonb_build_object(
         'success', true,
@@ -5924,19 +5966,16 @@ BEGIN
 END;
 $$;
 
--- 5. P1-04: GLOBAL GÜVENLİK - TÜM SECURITY DEFINER FONKSİYONLARININ YETKİLERİNİ KESİNLEŞTİR
-DO $$
-DECLARE
-    f RECORD;
-BEGIN
-    FOR f IN (
-        SELECT p.proname, pg_get_function_identity_arguments(p.oid) as args
-        FROM pg_proc p
-        JOIN pg_namespace n ON n.oid = p.pronamespace
-        WHERE n.nspname = 'public' 
-          AND p.prosecdef = true
-    ) LOOP
-        EXECUTE 'REVOKE ALL ON FUNCTION public.' || quote_ident(f.proname) || '(' || f.args || ') FROM PUBLIC;';
-        EXECUTE 'GRANT EXECUTE ON FUNCTION public.' || quote_ident(f.proname) || '(' || f.args || ') TO authenticated;';
-    END LOOP;
-END $$;
+-- 5. EXPLICIT ROLE-BASED ALLOWLIST (P0-01 Blanket Grant Kaldırıldı)
+-- Tüm fonksiyonların public yetkisini kapat, YALNIZCA son kullanıcının çağırabileceği RPC'leri allowlist ile aç:
+REVOKE ALL ON FUNCTION public.save_task_mutation(uuid, text, text, integer, text, text, text, integer, text, timestamptz, text, boolean, integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.save_task_mutation(uuid, text, text, integer, text, text, text, integer, text, timestamptz, text, boolean, integer) TO authenticated;
+
+REVOKE ALL ON FUNCTION public.create_voice_task_with_quota(text, text, text, integer, text, text, text, integer, text, timestamptz, text, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.create_voice_task_with_quota(text, text, text, integer, text, text, text, integer, text, timestamptz, text, text) TO authenticated;
+
+REVOKE ALL ON FUNCTION public.consume_ai_quota(text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.consume_ai_quota(text) TO authenticated;
+
+REVOKE ALL ON FUNCTION public.refund_ai_quota(text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.refund_ai_quota(text) TO authenticated;
