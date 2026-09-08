@@ -1,4 +1,4 @@
-name: Quality Gate
+name: Production Quality Gate
 
 on:
   push:
@@ -7,9 +7,9 @@ on:
     branches: [ main, master ]
 
 jobs:
-  quality_check:
+  validate:
+    name: Lint, Test & Release Build
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
 
@@ -28,11 +28,14 @@ jobs:
       - name: Install Dependencies
         run: flutter pub get
 
-      - name: Build Android APK
-        run: flutter build apk --debug
+      - name: Verify Code Formatting
+        run: dart format --output=none --set-exit-if-changed .
 
-      - name: Upload APK Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-debug-apk
-          path: build/app/outputs/flutter-apk/app-debug.apk
+      - name: Static Code Analysis (Flutter Analyze)
+        run: flutter analyze --fatal-infos --fatal-warnings
+
+      - name: Run Unit & Logic Tests
+        run: flutter test --coverage
+
+      - name: Build Android Release APK
+        run: flutter build apk --release
