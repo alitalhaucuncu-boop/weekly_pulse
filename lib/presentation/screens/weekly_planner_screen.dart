@@ -1425,13 +1425,6 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                         labelText: 'Algılanan Metin',
                         border: OutlineInputBorder(),
                       ),
-                      onChanged: (text) {
-                        if (dialogContext.mounted) {
-                          setStateDialog(() {
-                            parsedResult = _parseVoiceCommandToTask(text);
-                          });
-                        }
-                      },
                     ),
                     const SizedBox(height: 12),
                     Container(
@@ -2259,67 +2252,38 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                 final derivedDayIndex = targetDate.weekday - 1;
 
                                 try {
-                                  dynamic rpcRes;
-                                  try {
-                                    rpcRes = await supabase.rpc(
-                                      'create_task_with_outbox',
-                                      params: {
-                                        'p_title': title,
-                                        'p_category': selectedCategory,
-                                        'p_day_index': derivedDayIndex,
-                                        'p_scheduled_date':
-                                            _formatDateToKey(targetDate),
-                                        'p_week_start_date':
-                                            _formatDateToKey(derivedWeekStart),
-                                        'p_task_mode': activeMode,
-                                        'p_task_time': formattedTime,
-                                        'p_duration_minutes': selectedDuration,
-                                        'p_priority': selectedPriority,
-                                        'p_deadline':
-                                            selectedDeadline?.toIso8601String(),
-                                        'p_reminder_time': selectedReminder,
-                                      },
-                                    );
-                                  } catch (rpcErr) {
-                                    debugPrint(
-                                        "RPC Hatası, doğrudan tablo insert'ine dönülüyor: $rpcErr");
+                                  // P0-01: Yalnızca tek kapı atomik RPC üzerinden görev eklenir.
+                                  final rpcRes = await supabase.rpc(
+                                    'create_task_with_outbox',
+                                    params: {
+                                      'p_title': title,
+                                      'p_category': selectedCategory,
+                                      'p_day_index': derivedDayIndex,
+                                      'p_scheduled_date':
+                                          _formatDateToKey(targetDate),
+                                      'p_week_start_date':
+                                          _formatDateToKey(derivedWeekStart),
+                                      'p_task_mode': activeMode,
+                                      'p_task_time': formattedTime,
+                                      'p_duration_minutes': selectedDuration,
+                                      'p_priority': selectedPriority,
+                                      'p_deadline':
+                                          selectedDeadline?.toIso8601String(),
+                                      'p_reminder_time': selectedReminder,
+                                    },
+                                  );
+
+                                  if (rpcRes is! Map ||
+                                      rpcRes['success'] != true ||
+                                      rpcRes['task'] == null) {
+                                    final err = (rpcRes is Map)
+                                        ? rpcRes['message']
+                                        : 'Sunucu geçersiz yanıt verdi.';
+                                    throw Exception(err ?? 'Kayıt başarısız.');
                                   }
 
-                                  TaskItem createdTask;
-
-                                  if (rpcRes is Map &&
-                                      rpcRes['success'] == true &&
-                                      rpcRes['task'] != null) {
-                                    createdTask =
-                                        TaskItem.fromJson(rpcRes['task']);
-                                  } else {
-                                    final rawInsert = await supabase
-                                        .from('weekly_tasks')
-                                        .insert({
-                                          'user_id': user.id,
-                                          'title': title,
-                                          'category': selectedCategory,
-                                          'day_index': derivedDayIndex,
-                                          'scheduled_date':
-                                              _formatDateToKey(targetDate),
-                                          'week_start_date': _formatDateToKey(
-                                              derivedWeekStart),
-                                          'task_mode': activeMode,
-                                          'task_time': formattedTime,
-                                          'duration_minutes': selectedDuration,
-                                          'priority': selectedPriority,
-                                          'deadline': selectedDeadline
-                                              ?.toIso8601String(),
-                                          'reminder_time': selectedReminder,
-                                          'is_completed': false,
-                                          'version': 1,
-                                          'sync_status': 'pending',
-                                        })
-                                        .select()
-                                        .single();
-
-                                    createdTask = TaskItem.fromJson(rawInsert);
-                                  }
+                                  final TaskItem createdTask =
+                                      TaskItem.fromJson(rpcRes['task']);
 
                                   if (modalContext.mounted) {
                                     Navigator.pop(modalContext);
@@ -2343,11 +2307,12 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                     );
                                   }
                                 } catch (e) {
-                                  debugPrint("Görev Ekleme Kritik Hata: $e");
+                                  debugPrint("Görev Ekleme Hatası (P0-01): $e");
                                   if (modalContext.mounted) {
                                     setStateModal(() {
                                       isAddSaving = false;
-                                      modalError = 'Kayıt Hatası: $e';
+                                      modalError =
+                                          'Kayıt gerçekleştirilemedi. Sunucu/Ağ hatası: $e';
                                     });
                                   }
                                 }

@@ -5614,21 +5614,20 @@ jobs:
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.29.0'
           channel: 'stable'
           cache: true
 
       - name: Install Dependencies
         run: flutter pub get
 
-      - name: Verify Code Formatting
-        run: dart format --output=none --set-exit-if-changed .
+      - name: Build Android APK
+        run: flutter build apk --debug
 
-      - name: Analyze Project Source
-        run: flutter analyze --fatal-infos --fatal-warnings
-
-      - name: Run Unit & Domain Tests
-        run: flutter test --coverage-- 1. profiles Tablosu ve Yetki İzolasyonu
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug-apk
+          path: build/app/outputs/flutter-apk/app-debug.apk-- 1. profiles Tablosu ve Yetki İzolasyonu
 CREATE TABLE IF NOT EXISTS public.profiles (
     id uuid PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
     email text,

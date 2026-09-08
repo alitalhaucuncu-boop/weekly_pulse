@@ -4,6 +4,8 @@ import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:timezone/data/latest.dart' as tz_data;
+import 'package:timezone/timezone.dart' as tz;
+import 'package:flutter_timezone/flutter_timezone.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'core/constants.dart';
@@ -16,7 +18,18 @@ void notificationTapBackground(NotificationResponse notificationResponse) {}
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // 1. Timezone veritabanını yükle ve cihazın yerel konumunu kesinleştir
   tz_data.initializeTimeZones();
+  try {
+    final dynamic tzInfo = await FlutterTimezone.getLocalTimezone();
+    final String timeZoneName =
+        (tzInfo is String) ? tzInfo : (tzInfo.name ?? tzInfo.toString());
+    tz.setLocalLocation(tz.getLocation(timeZoneName));
+  } catch (e) {
+    debugPrint('Cihaz saat dilimi okunamadı, varsayılan UTC atanıyor: $e');
+    tz.setLocalLocation(tz.getLocation('UTC'));
+  }
 
   await Supabase.initialize(
     url: supabaseUrl,
