@@ -38,8 +38,9 @@ class TaskSyncCoordinator {
     String? notifError;
     String? calError;
     bool isConflict = false;
+    bool isNetworkOrDbError = false;
 
-    // 1. Bildirim Senkronizasyonu (P1-06: skippedPast ayrımı)
+    // 1. Bildirim Senkronizasyonu
     final int resolvedNotifId =
         NotificationService.resolveNotificationId(task: task);
     task.notificationId = resolvedNotifId;
@@ -57,7 +58,7 @@ class TaskSyncCoordinator {
           notifSuccess = true;
         } else if (statusStr.contains('skippedpast')) {
           notifSkippedPast = true;
-          notifSuccess = false; // Geçmiş saat başarısız değil ama kurulmadı
+          notifSuccess = false;
           notifError = 'Görev saati geçmiş olduğu için bildirim kurulmadı.';
         } else {
           notifError = 'Bildirim kurulamadı ($scheduleStatus).';
@@ -73,7 +74,7 @@ class TaskSyncCoordinator {
       } catch (_) {}
     }
 
-    // 2. Takvim Entegrasyonu (Typed Direct Call)
+    // 2. Takvim Entegrasyonu
     try {
       final calId = await CalendarService.getDefaultCalendarId();
       if (calId == null || calId.isEmpty) {
@@ -100,7 +101,7 @@ class TaskSyncCoordinator {
       calError = 'Takvim hatası: $e';
     }
 
-    // 3. Durum Değerlendirmesi: Bildirim kuruldu veya gelecek planlandıysa synced[cite: 5]
+    // 3. Durum Değerlendirmesi
     final bool calOk = (calStatus == CalendarSyncStatus.synced ||
         calStatus == CalendarSyncStatus.skippedByUser);
     final bool isAllSynced = notifSuccess && calOk;
@@ -110,7 +111,7 @@ class TaskSyncCoordinator {
 
     task.syncStatus = syncStatus;
 
-    // 4. Metadata Güncellemesi & Zero-Row Kontrolü[cite: 5]
+    // 4. Metadata Güncellemesi: P1-08 Sıfır Satır (Conflict) ile Ağ Hatasını Ayırma
     try {
       final user = supabase.auth.currentUser;
       if (user != null && task.id.isNotEmpty) {
@@ -136,13 +137,15 @@ class TaskSyncCoordinator {
         }
       }
     } catch (e) {
-      debugPrint("Sync Metadata Kayıt Hatası: $e");
-      isConflict = true;
+      debugPrint("Sync Metadata Ağ/Kayıt Hatası: $e");
+      isNetworkOrDbError = true;
     }
 
     String? userMsg;
     if (isConflict) {
-      userMsg = 'Görev versiyonu eski, senkronizasyon askıya alındı.';
+      userMsg = 'Görev başka bir cihazda değiştirilmiş (Versiyon uyuşmazlığı).';
+    } else if (isNetworkOrDbError) {
+      userMsg = 'Senkronizasyon sunucuya yazılamadı (Bağlantı hatası).';
     } else if (notifSkippedPast) {
       userMsg = 'Plan kaydedildi (Zamanı geçmiş bildirim planlanmadı).';
     } else if (!isAllSynced) {
@@ -150,7 +153,7 @@ class TaskSyncCoordinator {
     }
 
     return TaskSyncResult(
-      isFullySynced: isAllSynced && !isConflict,
+      isFullySynced: isAllSynced && !isConflict && !isNetworkOrDbError,
       effectiveUserMessage: userMsg,
       notificationSuccess: notifSuccess,
       notificationSkippedPast: notifSkippedPast,

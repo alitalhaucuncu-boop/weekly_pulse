@@ -1,12 +1,31 @@
--- 1. MEVCUT CANLI TABLOLARIN TÜM EKSİK KOLONLARINI EKLE (P0-02)
+-- WeeklyPulse Canonical Production Migration v10
+-- Kapsam: Deterministik Backfill, Dar Kapsamlı Constraint Göçü, Kota Defteri ve Tam Yetkilendirme
+
+-- 1. TABLO KISITLAMALARI
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'check_weekly_tasks_mode') THEN
+        ALTER TABLE public.weekly_tasks ADD CONSTRAINT check_weekly_tasks_mode CHECK (task_mode IN ('student', 'pro'));
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'check_weekly_tasks_priority') THEN
+        ALTER TABLE public.weekly_tasks ADD CONSTRAINT check_weekly_tasks_priority CHECK (priority IN ('Düşük', 'Orta', 'Yüksek', 'Kritik'));
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'check_weekly_tasks_duration') THEN
+        ALTER TABLE public.weekly_tasks ADD CONSTRAINT check_weekly_tasks_duration CHECK (duration_minutes BETWEEN 15 AND 480);
+    END IF;
+END $$;
+
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS last_usage_week text;
 
+-- 2. SYNC_OPERATIONS ŞEMA & BACKFILL & DAR KAPSAMLI CONSTRAINT GÖÇÜ (P0-01 & P0-02)
 CREATE TABLE IF NOT EXISTS public.sync_operations (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
     task_id uuid REFERENCES public.weekly_tasks(id) ON DELETE SET NULL,
     operation_type text NOT NULL,
-    idempotency_key text NOT NULL,
+    idempotency_key text,
     desired_state jsonb NOT NULL DEFAULT '{}'::jsonb,
     state_version integer NOT NULL DEFAULT 1,
     status text NOT NULL DEFAULT 'pending',
@@ -19,45 +38,64 @@ CREATE TABLE IF NOT EXISTS public.sync_operations (
     updated_at timestamptz NOT NULL DEFAULT now()
 );
 
+-- Eksik kolonları ekle
 ALTER TABLE public.sync_operations ADD COLUMN IF NOT EXISTS idempotency_key text;
 ALTER TABLE public.sync_operations ADD COLUMN IF NOT EXISTS desired_state jsonb NOT NULL DEFAULT '{}'::jsonb;
 ALTER TABLE public.sync_operations ADD COLUMN IF NOT EXISTS state_version integer NOT NULL DEFAULT 1;
 ALTER TABLE public.sync_operations ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'pending';
-ALTER TABLE public.sync_operations ADD COLUMN IF NOT EXISTS attempt_count integer NOT NULL DEFAULT 0;
-ALTER TABLE public.sync_operations ADD COLUMN IF NOT EXISTS max_attempts integer NOT NULL DEFAULT 5;
-ALTER TABLE public.sync_operations ADD COLUMN IF NOT EXISTS next_retry_at timestamptz DEFAULT now();
-ALTER TABLE public.sync_operations ADD COLUMN IF NOT EXISTS locked_until timestamptz;
-ALTER TABLE public.sync_operations ADD COLUMN IF NOT EXISTS last_error text;
-ALTER TABLE public.sync_operations ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();
 
--- FK'yı SET NULL olarak güncelle
+-- FK'yı SET NULL yap (Görev silindiğinde dış temizlik kaydı kaybolmaz)
 ALTER TABLE public.sync_operations DROP CONSTRAINT IF EXISTS sync_operations_task_id_fkey;
 ALTER TABLE public.sync_operations 
 ADD CONSTRAINT sync_operations_task_id_fkey 
 FOREIGN KEY (task_id) REFERENCES public.weekly_tasks(id) ON DELETE SET NULL;
 
--- 2. DETERMINISTIC UNIQUE CONSTRAINT MIGRATION (P0-03)
--- Varsa eski duplicate kayıtları temizle
-DELETE FROM public.sync_operations a USING public.sync_operations b
-WHERE a.id < b.id 
-  AND a.user_id = b.user_id 
-  AND a.idempotency_key = b.idempotency_key;
+-- P0-01: Null/boş idempotency_key kayıtları için deterministik backfill
+UPDATE public.sync_operations 
+SET idempotency_key = 'legacy_op_' || id::text 
+WHERE idempotency_key IS NULL OR trim(idempotency_key) = '';
 
--- Kataloğu tarayıp idempotency_key üzerindeki tüm eski constraint'leri temizle
+-- Kolonu zorunlu (NOT NULL) yap
+ALTER TABLE public.sync_operations ALTER COLUMN idempotency_key SET NOT NULL;
+
+-- P1-02: Status öncelikli mükerrer temizliği (completed > processing > pending > failed)
+WITH ranked_ops AS (
+    SELECT id,
+           ROW_NUMBER() OVER (
+               PARTITION BY user_id, idempotency_key 
+               ORDER BY 
+                   CASE status 
+                       WHEN 'completed' THEN 1 
+                       WHEN 'processing' THEN 2 
+                       WHEN 'pending' THEN 3 
+                       ELSE 4 
+                   END,
+                   created_at ASC
+           ) as rn
+    FROM public.sync_operations
+)
+DELETE FROM public.sync_operations 
+WHERE id IN (SELECT id FROM ranked_ops WHERE rn > 1);
+
+-- P0-02: YALNIZCA idempotency_key içeren UNIQUE constraint'leri hedefle ve kaldır
 DO $$
 DECLARE
     r RECORD;
 BEGIN
     FOR r IN (
-        SELECT conname 
-        FROM pg_constraint 
-        WHERE conrelid = 'public.sync_operations'::regclass 
-          AND contype = 'u'
+        SELECT c.conname
+        FROM pg_constraint c
+        JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY(c.conkey)
+        WHERE c.conrelid = 'public.sync_operations'::regclass
+          AND c.contype = 'u'
+          AND a.attname = 'idempotency_key'
     ) LOOP
         EXECUTE 'ALTER TABLE public.sync_operations DROP CONSTRAINT IF EXISTS ' || quote_ident(r.conname);
     END LOOP;
 END $$;
 
+-- Kullanıcı kapsamlı kesin unique kuralı ekle
+ALTER TABLE public.sync_operations DROP CONSTRAINT IF EXISTS unique_user_outbox_key;
 ALTER TABLE public.sync_operations 
 ADD CONSTRAINT unique_user_outbox_key UNIQUE (user_id, idempotency_key);
 
@@ -72,16 +110,18 @@ ON public.sync_operations FOR SELECT
 TO authenticated
 USING (auth.uid() = user_id);
 
--- 3. AI QUOTA TABLOSU VE STATUS CHECK CONSTRAINT
+-- 3. AI QUOTA LEDGER & PERIOD DESTEĞİ (P0-03)
 CREATE TABLE IF NOT EXISTS public.ai_quota_logs (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
     request_id text NOT NULL,
+    period_key text NOT NULL DEFAULT to_char(now(), 'IYYY-IW'),
     status text NOT NULL DEFAULT 'consumed',
     created_at timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT unique_user_ai_request UNIQUE (user_id, request_id)
 );
 
+ALTER TABLE public.ai_quota_logs ADD COLUMN IF NOT EXISTS period_key text NOT NULL DEFAULT to_char(now(), 'IYYY-IW');
 ALTER TABLE public.ai_quota_logs ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'consumed';
 ALTER TABLE public.ai_quota_logs DROP CONSTRAINT IF EXISTS check_ai_log_status;
 ALTER TABLE public.ai_quota_logs ADD CONSTRAINT check_ai_log_status CHECK (status IN ('consumed', 'refunded'));
@@ -93,9 +133,9 @@ ON public.ai_quota_logs FOR SELECT
 TO authenticated
 USING (auth.uid() = user_id);
 
--- 4. DEADLOCK KORUMALI VE KESİN KİLİT SIRALI CANONICAL RPC'LER (P0-01)
+-- 4. CANONICAL RPC FONKSİYONLARI
 
--- save_task_mutation
+-- save_task_mutation (P1-10: Tam Desired State Dahil)
 CREATE OR REPLACE FUNCTION public.save_task_mutation(
     p_task_id uuid,
     p_title text,
@@ -175,13 +215,21 @@ BEGIN
     RETURNING * INTO v_updated_task;
 
     v_idempotency_key := 'mutation_' || p_task_id::text || '_' || v_updated_task.version::text;
+    
+    -- P1-10: Dış senkronizasyon için eksiksiz tam desired state
     v_desired_state := jsonb_build_object(
         'task_id', p_task_id,
         'title', trim(p_title),
         'category', p_category,
+        'task_mode', v_updated_task.task_mode,
         'scheduled_date', p_scheduled_date,
+        'week_start_date', p_week_start_date,
+        'day_index', p_day_index,
         'task_time', p_task_time,
         'duration_minutes', p_duration_minutes,
+        'priority', p_priority,
+        'deadline', p_deadline,
+        'reminder_time', p_reminder_time,
         'is_completed', p_is_completed,
         'version', v_updated_task.version
     );
@@ -218,7 +266,7 @@ BEGIN
 END;
 $$;
 
--- create_voice_task_with_quota (Süre clamp edilmez, katı doğrulanır - P1-04)
+-- create_voice_task_with_quota
 CREATE OR REPLACE FUNCTION public.create_voice_task_with_quota(
     p_request_id text,
     p_title text,
@@ -351,10 +399,17 @@ BEGIN
         jsonb_build_object(
             'task_id', v_task_id,
             'title', trim(p_title),
+            'category', p_category,
+            'task_mode', v_effective_mode,
             'scheduled_date', p_scheduled_date,
+            'week_start_date', p_week_start_date,
+            'day_index', p_day_index,
             'task_time', p_task_time,
             'duration_minutes', p_duration_minutes,
-            'task_mode', v_effective_mode,
+            'priority', p_priority,
+            'deadline', p_deadline,
+            'reminder_time', p_reminder_time,
+            'is_completed', false,
             'version', 1
         ),
         1,
@@ -378,7 +433,7 @@ BEGIN
 END;
 $$;
 
--- consume_ai_quota (Lock Order: Önce profile FOR UPDATE, sonra log)
+-- consume_ai_quota (P0-03: Period-Aware Ledger Kontrolü)
 CREATE OR REPLACE FUNCTION public.consume_ai_quota(
     p_request_id text
 )
@@ -392,8 +447,9 @@ DECLARE
     v_is_premium boolean;
     v_ai_usage integer;
     v_existing_log record;
-    v_current_week text;
+    v_current_period text;
     v_last_usage_week text;
+    v_consumed_count integer;
 BEGIN
     v_user_id := auth.uid();
     IF v_user_id IS NULL THEN
@@ -404,7 +460,9 @@ BEGIN
         RETURN jsonb_build_object('success', false, 'code', 'INVALID_REQUEST_ID', 'message', 'Geçersiz istek kimliği.');
     END IF;
 
-    -- 1. ÖNCE PROFİL KİLİTLENİR (Lock Order 1)
+    v_current_period := to_char(now(), 'IYYY-IW');
+
+    -- 1. ÖNCE PROFİLİ KİLİTLE
     SELECT is_premium, ai_usage, last_usage_week 
     INTO v_is_premium, v_ai_usage, v_last_usage_week
     FROM public.profiles
@@ -415,7 +473,7 @@ BEGIN
         RETURN jsonb_build_object('success', false, 'message', 'Profil bulunamadı.');
     END IF;
 
-    -- 2. KİLİTTEN SONRA LOG KONTROLÜ
+    -- 2. KİLİTTEN SONRA REQUEST İD KONTROLÜ (Tekil istek tekrarı)
     SELECT * INTO v_existing_log 
     FROM public.ai_quota_logs 
     WHERE user_id = v_user_id AND request_id = p_request_id;
@@ -429,28 +487,38 @@ BEGIN
         );
     END IF;
 
-    -- 3. HAFTALIK ROLLOVER
-    v_current_week := to_char(now(), 'IYYY-IW');
-    IF v_last_usage_week IS DISTINCT FROM v_current_week THEN
+    -- 3. HAFTALIK ROLLOVER (Profile Sayacı)
+    IF v_last_usage_week IS DISTINCT FROM v_current_period THEN
         v_ai_usage := 0;
         UPDATE public.profiles 
-        SET ai_usage = 0, voice_usage = 0, last_usage_week = v_current_week 
+        SET ai_usage = 0, voice_usage = 0, last_usage_week = v_current_period 
         WHERE id = v_user_id;
     END IF;
 
-    IF NOT v_is_premium AND v_ai_usage >= 1 THEN
-        RETURN jsonb_build_object('success', false, 'code', 'LIMIT_EXCEEDED', 'message', 'Haftalık Akıllı Analiz kotanız doldu.');
+    -- 4. P0-03: LEDGER İLE PERIOD KOTA KONTROLÜ (Gerçek Tüketim Sayımı)
+    IF NOT v_is_premium THEN
+        SELECT count(*) INTO v_consumed_count 
+        FROM public.ai_quota_logs 
+        WHERE user_id = v_user_id 
+          AND period_key = v_current_period 
+          AND status = 'consumed';
+
+        IF v_consumed_count >= 1 THEN
+            RETURN jsonb_build_object('success', false, 'code', 'LIMIT_EXCEEDED', 'message', 'Haftalık Akıllı Analiz kotanız doldu.');
+        END IF;
     END IF;
 
-    -- 4. LOG KAYDI (Lock Order 2)
+    -- 5. LEDGER'A YAZ
     INSERT INTO public.ai_quota_logs (
         request_id,
         user_id,
+        period_key,
         status,
         created_at
     ) VALUES (
         p_request_id,
         v_user_id,
+        v_current_period,
         'consumed',
         now()
     );
@@ -469,7 +537,7 @@ BEGIN
 END;
 $$;
 
--- refund_ai_quota (P0-01 DEADLOCK ÇÖZÜMÜ: Önce profile FOR UPDATE, sonra log FOR UPDATE)
+-- refund_ai_quota (P1-05: Kesin Status Semantiği)
 CREATE OR REPLACE FUNCTION public.refund_ai_quota(
     p_request_id text
 )
@@ -489,7 +557,7 @@ BEGIN
         RETURN jsonb_build_object('success', false, 'code', 'UNAUTHORIZED', 'message', 'Oturum açılmamış.');
     END IF;
 
-    -- 1. DEADLOCK ENGELLEMEK İÇİN ÖNCE PROFİL KİLİTLENİR (Lock Order 1)
+    -- 1. DEADLOCK ÖNLEME: Önce profil kilitlenir
     SELECT is_premium, ai_usage INTO v_is_premium, v_usage 
     FROM public.profiles 
     WHERE id = v_user_id 
@@ -499,7 +567,7 @@ BEGIN
         RETURN jsonb_build_object('success', false, 'message', 'Kullanıcı profili bulunamadı.');
     END IF;
 
-    -- 2. ARDINDAN LOG SATIRI KİLİTLENİR (Lock Order 2)
+    -- 2. LOG SATIRI KİLİTLENİR
     SELECT * INTO v_log
     FROM public.ai_quota_logs
     WHERE user_id = v_user_id AND request_id = p_request_id
@@ -509,13 +577,11 @@ BEGIN
         RETURN jsonb_build_object('success', false, 'code', 'NOT_FOUND', 'message', 'İade edilecek tüketim kaydı bulunamadı.');
     END IF;
 
-    -- Yalnızca 'consumed' ise iade yap (P1-02)
-    IF v_log.status <> 'consumed' THEN
-        RETURN jsonb_build_object(
-            'success', true, 
-            'ai_usage', v_usage, 
-            'message', 'Bu istek zaten iade edilmiş veya geçersiz durumda.'
-        );
+    -- P1-05: Kesin ayrım (refunded ise idempotent success, consumed dışında ise typed failure)
+    IF v_log.status = 'refunded' THEN
+        RETURN jsonb_build_object('success', true, 'ai_usage', v_usage, 'message', 'Bu istek zaten iade edilmiş.');
+    ELSIF v_log.status <> 'consumed' THEN
+        RETURN jsonb_build_object('success', false, 'code', 'INVALID_STATUS', 'message', 'Yalnızca aktif tüketimler iade edilebilir.');
     END IF;
 
     IF NOT v_is_premium THEN
@@ -539,15 +605,19 @@ BEGIN
 END;
 $$;
 
--- 5. FUNCTION GRANTS SINIRLANDIRMASI (P1-01)
-REVOKE ALL ON FUNCTION public.save_task_mutation(uuid, text, text, integer, text, text, text, integer, text, timestamptz, text, boolean, integer) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.save_task_mutation(uuid, text, text, integer, text, text, text, integer, text, timestamptz, text, boolean, integer) TO authenticated;
-
-REVOKE ALL ON FUNCTION public.create_voice_task_with_quota(text, text, text, integer, text, text, text, integer, text, timestamptz, text, text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.create_voice_task_with_quota(text, text, text, integer, text, text, text, integer, text, timestamptz, text, text) TO authenticated;
-
-REVOKE ALL ON FUNCTION public.consume_ai_quota(text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.consume_ai_quota(text) TO authenticated;
-
-REVOKE ALL ON FUNCTION public.refund_ai_quota(text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.refund_ai_quota(text) TO authenticated;
+-- 5. P1-04: GLOBAL GÜVENLİK - TÜM SECURITY DEFINER FONKSİYONLARININ YETKİLERİNİ KESİNLEŞTİR
+DO $$
+DECLARE
+    f RECORD;
+BEGIN
+    FOR f IN (
+        SELECT p.proname, pg_get_function_identity_arguments(p.oid) as args
+        FROM pg_proc p
+        JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE n.nspname = 'public' 
+          AND p.prosecdef = true
+    ) LOOP
+        EXECUTE 'REVOKE ALL ON FUNCTION public.' || quote_ident(f.proname) || '(' || f.args || ') FROM PUBLIC;';
+        EXECUTE 'GRANT EXECUTE ON FUNCTION public.' || quote_ident(f.proname) || '(' || f.args || ') TO authenticated;';
+    END LOOP;
+END $$;
