@@ -36,7 +36,7 @@ class TaskSyncCoordinator {
     String? calError;
     bool isConflict = false;
 
-    // 1. Bildirim Senkronizasyonu & Kalıcı ID Atama
+    // 1. Bildirim Senkronizasyonu & Kalıcı ID Atama[cite: 4]
     final int resolvedNotifId =
         NotificationService.resolveNotificationId(task: task);
     task.notificationId = resolvedNotifId;
@@ -68,7 +68,7 @@ class TaskSyncCoordinator {
       } catch (_) {}
     }
 
-    // 2. Takvim Entegrasyonu: CalendarService API Uyumlu Çağrı (calendarId named parameter hatası giderildi)
+    // 2. Takvim Entegrasyonu: Typed Doğrudan Çağrı (P1-01 Düzeltmesi)[cite: 4]
     try {
       final calId = await CalendarService.getDefaultCalendarId();
       if (calId == null || calId.isEmpty) {
@@ -76,33 +76,17 @@ class TaskSyncCoordinator {
       } else {
         task.calendarId = calId;
 
-        dynamic eventResult;
-        try {
-          // Positional çağrı denemesi: addOrUpdateEvent(calendarId, task, targetDate)
-          eventResult = await (CalendarService.addOrUpdateEvent as dynamic)(
-            calId,
-            task,
-            targetDate,
-          );
-        } catch (_) {
-          try {
-            // Named task & targetDate çağrısı denemesi
-            eventResult = await (CalendarService.addOrUpdateEvent as dynamic)(
-              task: task,
-              targetDate: targetDate,
-            );
-          } catch (e) {
-            eventResult = null;
-            calError = e.toString();
-          }
-        }
+        final String? eventId = await CalendarService.addOrUpdateEvent(
+          task: task,
+          targetDate: targetDate,
+        );
 
-        if (eventResult != null && eventResult.toString().isNotEmpty) {
-          task.calendarEventId = eventResult.toString();
+        if (eventId != null && eventId.isNotEmpty) {
+          task.calendarEventId = eventId;
           calStatus = CalendarSyncStatus.synced;
         } else {
           calStatus = CalendarSyncStatus.failed;
-          calError ??= 'Takvim etkinliği oluşturulamadı.';
+          calError = 'Takvim etkinliği oluşturulamadı.';
         }
       }
     } catch (e) {
@@ -111,7 +95,7 @@ class TaskSyncCoordinator {
       calError = 'Takvim hatası: $e';
     }
 
-    // 3. Senkronizasyon Durumu Hesabı
+    // 3. Senkronizasyon Durumu Hesabı (Capability-Aware)
     final bool calOk = (calStatus == CalendarSyncStatus.synced ||
         calStatus == CalendarSyncStatus.skippedByUser);
     final bool isAllSynced = notifSuccess && calOk;
@@ -119,7 +103,7 @@ class TaskSyncCoordinator {
 
     task.syncStatus = syncStatus;
 
-    // 4. Metadata Güncellemesi & Zero-Row Kontrolü
+    // 4. Metadata Güncellemesi & Zero-Row Kontrolü (P0-04)[cite: 4]
     try {
       final user = supabase.auth.currentUser;
       if (user != null && task.id.isNotEmpty) {
@@ -146,6 +130,7 @@ class TaskSyncCoordinator {
       }
     } catch (e) {
       debugPrint("Sync Metadata Kayıt Hatası: $e");
+      isConflict = true;
     }
 
     String? userMsg;
