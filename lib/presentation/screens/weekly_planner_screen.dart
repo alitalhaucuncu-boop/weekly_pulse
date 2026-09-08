@@ -19,7 +19,7 @@ import 'auth_screen.dart';
 
 enum ViewMode { daily, weekly, monthly }
 
-enum TaskMoveStatus { success, partial, failed, busy }
+enum TaskMoveStatus { success, partial, failed, busy, conflict }
 
 class TaskMoveResult {
   final TaskMoveStatus status;
@@ -29,6 +29,7 @@ class TaskMoveResult {
 
   bool get isSuccess => status == TaskMoveStatus.success;
   bool get isBusy => status == TaskMoveStatus.busy;
+  bool get isConflict => status == TaskMoveStatus.conflict;
 }
 
 Function(String taskId)? onGlobalNotificationFocus;
@@ -56,6 +57,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
   DateTime selectedCalendarDay = DateTime.now();
 
   bool _isLoadingTasks = true;
+  String? _taskFetchError;
   final Set<String> _movingTaskIds = <String>{};
 
   late DateTime currentWeekMonday;
@@ -405,6 +407,15 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                       backgroundColor: Colors.blueGrey,
                     ),
                   );
+                } else if (result.isConflict) {
+                  scaffoldMessenger.showSnackBar(
+                    const SnackBar(
+                      content: Text(
+                          '⚠️ Bu görev başka bir cihazda değiştirilmiş. Liste yenilendi.'),
+                      backgroundColor: Colors.redAccent,
+                    ),
+                  );
+                  _fetchTasks();
                 } else {
                   scaffoldMessenger.showSnackBar(
                     SnackBar(
@@ -690,6 +701,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
     );
   }
 
+  // P1-05 & P1-07 DÜZELTMESİ: Kota hatasında otomatik refund (iade) garantisi
   void _showAIAnalysisModal() async {
     final scaffoldMessenger = ScaffoldMessenger.of(context);
     final user = supabase.auth.currentUser;
@@ -736,8 +748,29 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
       }
     }
 
-    final report =
-        PlanningEngine.generateWeeklyIntelligenceReport(allFetchedTasks);
+    // Rapor oluşturma ve hata durumunda kotayı iade etme güvencesi
+    Map<String, dynamic> report;
+    try {
+      report = PlanningEngine.generateWeeklyIntelligenceReport(allFetchedTasks);
+    } catch (engineError) {
+      debugPrint("Rapor Üretim Hatası, kota iade ediliyor: $engineError");
+      if (!isUserPremium) {
+        try {
+          await supabase
+              .rpc('refund_ai_quota', params: {'p_request_id': requestId});
+          if (mounted) {
+            setState(() => aiUsage = (aiUsage > 0) ? aiUsage - 1 : 0);
+          }
+        } catch (_) {}
+      }
+      if (mounted) {
+        scaffoldMessenger.showSnackBar(
+          const SnackBar(
+              content: Text('Rapor oluşturulamadı, hakkınız iade edildi.')),
+        );
+      }
+      return;
+    }
 
     if (!mounted) {
       return;
@@ -1907,57 +1940,85 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                           selectedDeadline?.toIso8601String(),
                                       'p_reminder_time': selectedReminder,
                                       'p_is_completed': task.isCompleted,
+                                      'p_expected_version': task.version,
                                     },
                                   );
 
-                                  task.title = newTitle;
-                                  task.category = selectedCategory;
-                                  task.dayIndex = derivedDayIndex;
-                                  task.scheduledDate =
-                                      _formatDateToKey(newDate);
-                                  task.weekStartDate =
-                                      _formatDateToKey(derivedWeekStart);
-                                  task.taskTime = formattedTime;
-                                  task.durationMinutes = selectedDuration;
-                                  task.priority = selectedPriority;
-                                  task.deadline = selectedDeadline;
-                                  task.reminderTime = selectedReminder;
                                   if (res is Map && res['success'] == true) {
+                                    task.title = newTitle;
+                                    task.category = selectedCategory;
+                                    task.dayIndex = derivedDayIndex;
+                                    task.scheduledDate =
+                                        _formatDateToKey(newDate);
+                                    task.weekStartDate =
+                                        _formatDateToKey(derivedWeekStart);
+                                    task.taskTime = formattedTime;
+                                    task.durationMinutes = selectedDuration;
+                                    task.priority = selectedPriority;
+                                    task.deadline = selectedDeadline;
+                                    task.reminderTime = selectedReminder;
                                     task.version =
                                         res['version'] ?? (task.version + 1);
-                                  }
 
-                                  if (modalContext.mounted) {
-                                    Navigator.pop(modalContext);
-                                  }
+                                    if (modalContext.mounted) {
+                                      Navigator.pop(modalContext);
+                                    }
 
-                                  final syncResult = await TaskSyncCoordinator
-                                      .coordinateTaskSync(
-                                    task: task,
-                                    targetDate: newDate,
-                                  );
-
-                                  if (!mounted) {
-                                    return;
-                                  }
-
-                                  _fetchTasks();
-                                  _fetchAllTasksForMonth(focusedCalendarDay);
-
-                                  if (!syncResult.isFullySynced && mounted) {
-                                    final msg =
-                                        syncResult.effectiveUserMessage ??
-                                            'Senkronizasyon tamamlanamadı.';
-                                    scaffoldMessenger.showSnackBar(
-                                      SnackBar(
-                                          content:
-                                              Text('⚠️ Güncellendi: $msg')),
+                                    final syncResult = await TaskSyncCoordinator
+                                        .coordinateTaskSync(
+                                      task: task,
+                                      targetDate: newDate,
                                     );
+
+                                    if (!mounted) {
+                                      return;
+                                    }
+
+                                    _fetchTasks();
+                                    _fetchAllTasksForMonth(focusedCalendarDay);
+
+                                    if (!syncResult.isFullySynced && mounted) {
+                                      final msg =
+                                          syncResult.effectiveUserMessage ??
+                                              'Senkronizasyon tamamlanamadı.';
+                                      scaffoldMessenger.showSnackBar(
+                                        SnackBar(
+                                            content:
+                                                Text('⚠️ Güncellendi: $msg')),
+                                      );
+                                    }
+                                  } else {
+                                    final errCode =
+                                        (res is Map) ? res['code'] : null;
+                                    if (errCode == 'VERSION_CONFLICT') {
+                                      if (modalContext.mounted) {
+                                        Navigator.pop(modalContext);
+                                      }
+                                      scaffoldMessenger.showSnackBar(
+                                        const SnackBar(
+                                          content: Text(
+                                              '⚠️ Bu görev başka bir cihazda değiştirilmiş. Liste yenilendi.'),
+                                          backgroundColor: Colors.redAccent,
+                                        ),
+                                      );
+                                      _fetchTasks();
+                                      return;
+                                    }
+                                    final errMsg = (res is Map)
+                                        ? res['message']
+                                        : 'Güncelleme sunucu tarafından reddedildi.';
+                                    throw Exception(errMsg);
                                   }
                                 } catch (e) {
                                   debugPrint("Görev Güncelleme Hatası: $e");
                                   if (modalContext.mounted) {
                                     setStateModal(() => isEditSaving = false);
+                                    scaffoldMessenger.showSnackBar(
+                                      SnackBar(
+                                        content: Text('Hata: $e'),
+                                        backgroundColor: Colors.redAccent,
+                                      ),
+                                    );
                                   }
                                 }
                               },
@@ -2307,12 +2368,12 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                     );
                                   }
                                 } catch (e) {
-                                  debugPrint("Görev Ekleme Hatası (P0-01): $e");
+                                  debugPrint("Görev Ekleme Hatası: $e");
                                   if (modalContext.mounted) {
                                     setStateModal(() {
                                       isAddSaving = false;
                                       modalError =
-                                          'Kayıt gerçekleştirilemedi. Sunucu/Ağ hatası: $e';
+                                          'Kayıt gerçekleştirilemedi: $e';
                                     });
                                   }
                                 }
@@ -2340,7 +2401,10 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
   }
 
   Future<void> _fetchTasks() async {
-    setState(() => _isLoadingTasks = true);
+    setState(() {
+      _isLoadingTasks = true;
+      _taskFetchError = null;
+    });
     try {
       final user = supabase.auth.currentUser;
       if (user == null) {
@@ -2362,10 +2426,19 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
       }
 
       if (mounted) {
-        setState(() => allFetchedTasks = loaded);
+        setState(() {
+          allFetchedTasks = loaded;
+          _taskFetchError = null;
+        });
       }
     } catch (e) {
       debugPrint('Çekme Hatası: $e');
+      if (mounted) {
+        setState(() {
+          _taskFetchError =
+              'Planlar yüklenemedi. İnternet bağlantınızı kontrol edin.';
+        });
+      }
     } finally {
       if (mounted) {
         setState(() => _isLoadingTasks = false);
@@ -2444,14 +2517,22 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
           'p_deadline': task.deadline?.toIso8601String(),
           'p_reminder_time': task.reminderTime,
           'p_is_completed': task.isCompleted,
+          'p_expected_version': task.version,
         },
       );
 
       if (updateRes is! Map || updateRes['success'] != true) {
+        final code = (updateRes is Map) ? updateRes['code'] : null;
         _movingTaskIds.remove(task.id);
+        if (code == 'VERSION_CONFLICT') {
+          return const TaskMoveResult(
+            status: TaskMoveStatus.conflict,
+            message: 'Görev başka bir cihazda değiştirilmiş.',
+          );
+        }
         return const TaskMoveResult(
           status: TaskMoveStatus.failed,
-          message: 'Görev veritabanında bulunamadı veya güncellenemedi.',
+          message: 'Görev veritabanında güncellenemedi.',
         );
       }
 
@@ -2577,7 +2658,6 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
     );
   }
 
-  // P1-10: Görev tamamlandığında bildirimi iptal et, geri açıldığında yeniden kur
   void _updateTaskCompletion(TaskItem task, bool isCompleted) async {
     final previousState = task.isCompleted;
     final scaffoldMessenger = ScaffoldMessenger.of(context);
@@ -2599,6 +2679,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
           'p_deadline': task.deadline?.toIso8601String(),
           'p_reminder_time': task.reminderTime,
           'p_is_completed': isCompleted,
+          'p_expected_version': task.version,
         },
       );
 
@@ -2616,6 +2697,17 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
             targetDate: targetDate,
           );
         }
+      } else {
+        final code = (res is Map) ? res['code'] : null;
+        if (code == 'VERSION_CONFLICT') {
+          _fetchTasks();
+          scaffoldMessenger.showSnackBar(
+            const SnackBar(
+                content: Text('⚠️ Görev başka bir cihazda değiştirilmiş.')),
+          );
+          return;
+        }
+        throw Exception();
       }
     } catch (_) {
       if (mounted) {
@@ -2736,224 +2828,257 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
       ),
       body: _isLoadingTasks
           ? const Center(child: CircularProgressIndicator())
-          : Column(
-              children: [
-                Container(
-                  margin:
-                      const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                  padding: const EdgeInsets.all(4),
-                  decoration: BoxDecoration(
-                    color: Theme.of(context).cardColor,
-                    borderRadius: BorderRadius.circular(16),
-                  ),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: GestureDetector(
-                          onTap: () => _switchMode('student'),
-                          child: AnimatedContainer(
-                            duration: const Duration(milliseconds: 200),
-                            padding: const EdgeInsets.symmetric(vertical: 8),
-                            decoration: BoxDecoration(
-                              color: isStudent
-                                  ? const Color(0xFF4A55A2)
-                                  : Colors.transparent,
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            child: Center(
-                              child: Text(
-                                '🎓 Öğrenci Modu',
-                                style: TextStyle(
-                                  color: isStudent ? Colors.white : Colors.grey,
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 12,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                      Expanded(
-                        child: GestureDetector(
-                          onTap: () => _switchMode('pro'),
-                          child: AnimatedContainer(
-                            duration: const Duration(milliseconds: 200),
-                            padding: const EdgeInsets.symmetric(vertical: 8),
-                            decoration: BoxDecoration(
-                              color: !isStudent
-                                  ? const Color(0xFF1E293B)
-                                  : Colors.transparent,
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            child: Center(
-                              child: Text(
-                                '💼 Pro / İş Modu',
-                                style: TextStyle(
-                                  color:
-                                      !isStudent ? Colors.white : Colors.grey,
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 12,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                Container(
-                  margin:
-                      const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
-                  padding: const EdgeInsets.all(3),
-                  decoration: BoxDecoration(
-                    color: Theme.of(context).cardColor.withValues(alpha: 0.6),
-                    borderRadius: BorderRadius.circular(12),
-                    border:
-                        Border.all(color: primaryColor.withValues(alpha: 0.2)),
-                  ),
-                  child: Row(
-                    children: [
-                      _buildViewModeButton(
-                          'Günlük 📅', ViewMode.daily, primaryColor),
-                      _buildViewModeButton(
-                          'Haftalık 🗓️', ViewMode.weekly, primaryColor),
-                      _buildViewModeButton(
-                          'Aylık 📆', ViewMode.monthly, primaryColor),
-                    ],
-                  ),
-                ),
-                if (currentViewMode != ViewMode.monthly)
-                  Container(
-                    margin:
-                        const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                    decoration: BoxDecoration(
-                      color: Theme.of(context).cardColor,
-                      borderRadius: BorderRadius.circular(16),
-                    ),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          : _taskFetchError != null
+              ? Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(24.0),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        IconButton(
-                          icon: const Icon(Icons.chevron_left, size: 28),
-                          onPressed: () => _changeWeek(-1),
-                          tooltip: 'Önceki Hafta',
+                        const Icon(Icons.wifi_off,
+                            size: 48, color: Colors.grey),
+                        const SizedBox(height: 12),
+                        Text(
+                          _taskFetchError!,
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(fontWeight: FontWeight.bold),
                         ),
-                        GestureDetector(
-                          onTap: _resetToCurrentWeek,
-                          child: Column(
-                            children: [
-                              Text(headerTitle,
-                                  style: const TextStyle(
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 13)),
-                              const SizedBox(height: 2),
-                              Text('Mevcut Haftaya Dön 📍',
-                                  style: TextStyle(
-                                      fontSize: 10,
-                                      color: primaryColor,
-                                      fontWeight: FontWeight.bold)),
-                            ],
-                          ),
-                        ),
-                        IconButton(
-                          icon: const Icon(Icons.chevron_right, size: 28),
-                          onPressed: () => _changeWeek(1),
-                          tooltip: 'Sonraki Hafta',
+                        const SizedBox(height: 16),
+                        ElevatedButton.icon(
+                          onPressed: _fetchTasks,
+                          icon: const Icon(Icons.refresh),
+                          label: const Text('Tekrar Dene'),
                         ),
                       ],
                     ),
                   ),
-                Container(
-                  margin:
-                      const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: InkWell(
-                          onTap: _showAIAnalysisModal,
-                          borderRadius: BorderRadius.circular(16),
-                          child: Container(
-                            padding: const EdgeInsets.all(12),
-                            decoration: BoxDecoration(
-                              gradient: isUserPremium
-                                  ? LinearGradient(colors: [
-                                      Colors.amber.shade900,
-                                      const Color(0xFF1E293B)
-                                    ])
-                                  : LinearGradient(colors: [
-                                      primaryColor.withValues(alpha: 0.85),
-                                      primaryColor
-                                    ]),
-                              borderRadius: BorderRadius.circular(16),
-                            ),
-                            child: Row(
-                              children: [
-                                Icon(
-                                    isUserPremium
-                                        ? Icons.stars
-                                        : Icons.auto_awesome,
-                                    color: Colors.amber,
-                                    size: 26),
-                                const SizedBox(width: 8),
-                                Expanded(
+                )
+              : Column(
+                  children: [
+                    Container(
+                      margin: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 4),
+                      padding: const EdgeInsets.all(4),
+                      decoration: BoxDecoration(
+                        color: Theme.of(context).cardColor,
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: GestureDetector(
+                              onTap: () => _switchMode('student'),
+                              child: AnimatedContainer(
+                                duration: const Duration(milliseconds: 200),
+                                padding:
+                                    const EdgeInsets.symmetric(vertical: 8),
+                                decoration: BoxDecoration(
+                                  color: isStudent
+                                      ? const Color(0xFF4A55A2)
+                                      : Colors.transparent,
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                                child: Center(
                                   child: Text(
-                                    isUserPremium
-                                        ? 'Weekly Intelligence VIP'
-                                        : 'Akıllı Haftalık Yaşam Raporu',
-                                    style: const TextStyle(
-                                        color: Colors.white,
-                                        fontWeight: FontWeight.bold,
-                                        fontSize: 12),
+                                    '🎓 Öğrenci Modu',
+                                    style: TextStyle(
+                                      color: isStudent
+                                          ? Colors.white
+                                          : Colors.grey,
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 12,
+                                    ),
                                   ),
                                 ),
-                              ],
+                              ),
                             ),
                           ),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      InkWell(
-                        onTap: _showSmartRebalanceDialog,
-                        borderRadius: BorderRadius.circular(16),
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 12, vertical: 12),
-                          decoration: BoxDecoration(
-                            color: Colors.deepPurple.withValues(alpha: 0.15),
-                            borderRadius: BorderRadius.circular(16),
-                            border: Border.all(
-                                color:
-                                    Colors.deepPurple.withValues(alpha: 0.4)),
-                          ),
-                          child: const Row(
-                            children: [
-                              Icon(Icons.balance,
-                                  color: Colors.deepPurple, size: 18),
-                              SizedBox(width: 4),
-                              Text('Dengele ⚖️',
-                                  style: TextStyle(
-                                      color: Colors.deepPurple,
+                          Expanded(
+                            child: GestureDetector(
+                              onTap: () => _switchMode('pro'),
+                              child: AnimatedContainer(
+                                duration: const Duration(milliseconds: 200),
+                                padding:
+                                    const EdgeInsets.symmetric(vertical: 8),
+                                decoration: BoxDecoration(
+                                  color: !isStudent
+                                      ? const Color(0xFF1E293B)
+                                      : Colors.transparent,
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                                child: Center(
+                                  child: Text(
+                                    '💼 Pro / İş Modu',
+                                    style: TextStyle(
+                                      color: !isStudent
+                                          ? Colors.white
+                                          : Colors.grey,
                                       fontWeight: FontWeight.bold,
-                                      fontSize: 12)),
-                            ],
+                                      fontSize: 12,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
                           ),
+                        ],
+                      ),
+                    ),
+                    Container(
+                      margin: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 2),
+                      padding: const EdgeInsets.all(3),
+                      decoration: BoxDecoration(
+                        color:
+                            Theme.of(context).cardColor.withValues(alpha: 0.6),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                            color: primaryColor.withValues(alpha: 0.2)),
+                      ),
+                      child: Row(
+                        children: [
+                          _buildViewModeButton(
+                              'Günlük 📅', ViewMode.daily, primaryColor),
+                          _buildViewModeButton(
+                              'Haftalık 🗓️', ViewMode.weekly, primaryColor),
+                          _buildViewModeButton(
+                              'Aylık 📆', ViewMode.monthly, primaryColor),
+                        ],
+                      ),
+                    ),
+                    if (currentViewMode != ViewMode.monthly)
+                      Container(
+                        margin: const EdgeInsets.symmetric(
+                            horizontal: 16, vertical: 4),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: Theme.of(context).cardColor,
+                          borderRadius: BorderRadius.circular(16),
+                        ),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            IconButton(
+                              icon: const Icon(Icons.chevron_left, size: 28),
+                              onPressed: () => _changeWeek(-1),
+                              tooltip: 'Önceki Hafta',
+                            ),
+                            GestureDetector(
+                              onTap: _resetToCurrentWeek,
+                              child: Column(
+                                children: [
+                                  Text(headerTitle,
+                                      style: const TextStyle(
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 13)),
+                                  const SizedBox(height: 2),
+                                  Text('Mevcut Haftaya Dön 📍',
+                                      style: TextStyle(
+                                          fontSize: 10,
+                                          color: primaryColor,
+                                          fontWeight: FontWeight.bold)),
+                                ],
+                              ),
+                            ),
+                            IconButton(
+                              icon: const Icon(Icons.chevron_right, size: 28),
+                              onPressed: () => _changeWeek(1),
+                              tooltip: 'Sonraki Hafta',
+                            ),
+                          ],
                         ),
                       ),
-                    ],
-                  ),
+                    Container(
+                      margin: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 4),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: InkWell(
+                              onTap: _showAIAnalysisModal,
+                              borderRadius: BorderRadius.circular(16),
+                              child: Container(
+                                padding: const EdgeInsets.all(12),
+                                decoration: BoxDecoration(
+                                  gradient: isUserPremium
+                                      ? LinearGradient(colors: [
+                                          Colors.amber.shade900,
+                                          const Color(0xFF1E293B)
+                                        ])
+                                      : LinearGradient(colors: [
+                                          primaryColor.withValues(alpha: 0.85),
+                                          primaryColor
+                                        ]),
+                                  borderRadius: BorderRadius.circular(16),
+                                ),
+                                child: Row(
+                                  children: [
+                                    Icon(
+                                        isUserPremium
+                                            ? Icons.stars
+                                            : Icons.auto_awesome,
+                                        color: Colors.amber,
+                                        size: 26),
+                                    const SizedBox(width: 8),
+                                    Expanded(
+                                      child: Text(
+                                        isUserPremium
+                                            ? 'Weekly Intelligence VIP'
+                                            : 'Akıllı Haftalık Yaşam Raporu',
+                                        style: const TextStyle(
+                                            color: Colors.white,
+                                            fontWeight: FontWeight.bold,
+                                            fontSize: 12),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          InkWell(
+                            onTap: _showSmartRebalanceDialog,
+                            borderRadius: BorderRadius.circular(16),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 12, vertical: 12),
+                              decoration: BoxDecoration(
+                                color:
+                                    Colors.deepPurple.withValues(alpha: 0.15),
+                                borderRadius: BorderRadius.circular(16),
+                                border: Border.all(
+                                    color: Colors.deepPurple
+                                        .withValues(alpha: 0.4)),
+                              ),
+                              child: const Row(
+                                children: [
+                                  Icon(Icons.balance,
+                                      color: Colors.deepPurple, size: 18),
+                                  SizedBox(width: 4),
+                                  Text('Dengele ⚖️',
+                                      style: TextStyle(
+                                          color: Colors.deepPurple,
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 12)),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Expanded(
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                        child:
+                            _buildBodyByViewMode(primaryColor, activeModeTasks),
+                      ),
+                    ),
+                  ],
                 ),
-                const SizedBox(height: 4),
-                Expanded(
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
-                    child: _buildBodyByViewMode(primaryColor, activeModeTasks),
-                  ),
-                ),
-              ],
-            ),
     );
   }
 
@@ -3032,6 +3157,15 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                           backgroundColor: Colors.blueGrey,
                         ),
                       );
+                    } else if (result.isConflict) {
+                      scaffoldMessenger.showSnackBar(
+                        const SnackBar(
+                          content: Text(
+                              '⚠️ Bu görev başka bir cihazda değiştirilmiş.'),
+                          backgroundColor: Colors.redAccent,
+                        ),
+                      );
+                      _fetchTasks();
                     } else if (!result.isSuccess) {
                       scaffoldMessenger.showSnackBar(
                         SnackBar(

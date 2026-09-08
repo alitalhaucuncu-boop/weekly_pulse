@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
@@ -19,7 +20,6 @@ void notificationTapBackground(NotificationResponse notificationResponse) {}
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // 1. Timezone veritabanını yükle ve cihazın yerel konumunu kesinleştir
   tz_data.initializeTimeZones();
   try {
     final dynamic tzInfo = await FlutterTimezone.getLocalTimezone();
@@ -96,11 +96,38 @@ class WeeklyPulseApp extends StatefulWidget {
 
 class _WeeklyPulseAppState extends State<WeeklyPulseApp> {
   late bool isDarkMode;
+  StreamSubscription<AuthState>? _authSubscription;
+  final GlobalKey<NavigatorState> _navigatorKey = GlobalKey<NavigatorState>();
 
   @override
   void initState() {
     super.initState();
     isDarkMode = widget.initialDarkMode;
+
+    // P1-03: Oturum değişimlerini ve token bitişini merkezi olarak dinle
+    _authSubscription = supabase.auth.onAuthStateChange.listen((data) {
+      final AuthChangeEvent event = data.event;
+      if (event == AuthChangeEvent.signedOut ||
+          event == AuthChangeEvent.tokenRefreshed) {
+        if (data.session == null && mounted) {
+          _navigatorKey.currentState?.pushAndRemoveUntil(
+            MaterialPageRoute(
+              builder: (_) => AuthScreen(
+                onThemeToggle: toggleTheme,
+                isDark: isDarkMode,
+              ),
+            ),
+            (route) => false,
+          );
+        }
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _authSubscription?.cancel();
+    super.dispose();
   }
 
   void toggleTheme() async {
@@ -112,6 +139,7 @@ class _WeeklyPulseAppState extends State<WeeklyPulseApp> {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      navigatorKey: _navigatorKey,
       title: 'WeeklyPulse',
       debugShowCheckedModeBanner: false,
       themeMode: isDarkMode ? ThemeMode.dark : ThemeMode.light,

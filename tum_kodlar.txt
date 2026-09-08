@@ -82,6 +82,171 @@ class CalendarService {
     }
   }
 }
+import 'package:flutter/foundation.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:timezone/timezone.dart' as tz;
+import '../domain/models/task_item.dart';
+
+enum NotificationScheduleStatus {
+  scheduled,
+  skippedPast,
+  skippedNoReminder,
+  failed,
+}
+
+class NotificationService {
+  static final FlutterLocalNotificationsPlugin plugin =
+      FlutterLocalNotificationsPlugin();
+
+  static int resolveNotificationId({required TaskItem task}) {
+    if (task.notificationId != null && task.notificationId! > 0) {
+      return task.notificationId!;
+    }
+    int hash = 5381;
+    final String raw = task.id.isNotEmpty
+        ? task.id
+        : "${task.title}_${task.weekStartDate}_${task.dayIndex}";
+    for (int i = 0; i < raw.length; i++) {
+      hash = ((hash << 5) + hash) + raw.codeUnitAt(i);
+      hash = hash & 0x7FFFFFFF;
+    }
+    return hash;
+  }
+
+  static Future<NotificationScheduleStatus> scheduleTaskNotification({
+    required TaskItem task,
+    required DateTime targetDate,
+  }) async {
+    try {
+      if (task.reminderTime == 'Hatırlatma Yok') {
+        final int notifId = resolveNotificationId(task: task);
+        await cancelNotification(notifId);
+        return NotificationScheduleStatus.skippedNoReminder;
+      }
+
+      final int notifId = resolveNotificationId(task: task);
+      await cancelNotification(notifId);
+
+      int h = 10, m = 0;
+      try {
+        final parts = task.taskTime.split(':');
+        if (parts.length == 2) {
+          h = int.parse(parts[0]);
+          m = int.parse(parts[1]);
+        }
+      } catch (_) {}
+
+      final taskDateTime = DateTime(
+        targetDate.year,
+        targetDate.month,
+        targetDate.day,
+        h,
+        m,
+      );
+
+      Duration offset = Duration.zero;
+      if (task.reminderTime == '10 Dakika Önce') {
+        offset = const Duration(minutes: 10);
+      } else if (task.reminderTime == '15 Dakika Önce') {
+        offset = const Duration(minutes: 15);
+      } else if (task.reminderTime == '30 Dakika Önce') {
+        offset = const Duration(minutes: 30);
+      } else if (task.reminderTime == '1 Saat Önce') {
+        offset = const Duration(hours: 1);
+      } else if (task.reminderTime == '3 Saat Önce') {
+        offset = const Duration(hours: 3);
+      } else if (task.reminderTime == '1 Gün Önce') {
+        offset = const Duration(days: 1);
+      } else if (task.reminderTime == '2 Gün Önce') {
+        offset = const Duration(days: 2);
+      }
+
+      final scheduledTime = taskDateTime.subtract(offset);
+
+      if (scheduledTime.isBefore(DateTime.now())) {
+        return NotificationScheduleStatus.skippedPast;
+      }
+
+      final tzScheduled = tz.TZDateTime.from(scheduledTime, tz.local);
+
+      const AndroidNotificationDetails androidDetails =
+          AndroidNotificationDetails(
+        'weeklypulse_tasks',
+        'Görev Hatırlatıcıları',
+        channelDescription: 'Planlanan görevler için hatırlatma bildirimleri',
+        importance: Importance.max,
+        priority: Priority.high,
+      );
+
+      const NotificationDetails details = NotificationDetails(
+        android: androidDetails,
+        iOS: DarwinNotificationDetails(presentAlert: true, presentSound: true),
+      );
+
+      await plugin.zonedSchedule(
+        notifId,
+        '⏰ ${task.title}',
+        '${task.taskTime} saatindeki planınız yaklaşıyor.',
+        tzScheduled,
+        details,
+        androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+        uiLocalNotificationDateInterpretation:
+            UILocalNotificationDateInterpretation.absoluteTime,
+        payload: task.id,
+      );
+
+      return NotificationScheduleStatus.scheduled;
+    } catch (e) {
+      debugPrint("Bildirim Planlama Hatası: $e");
+      return NotificationScheduleStatus.failed;
+    }
+  }
+
+  static Future<void> cancelNotification(int id) async {
+    try {
+      await plugin.cancel(id);
+    } catch (e) {
+      debugPrint("Bildirim İptal Hatası: $e");
+    }
+  }
+
+  static Future<void> scheduleWeeklyReportNotification(
+      {required String userTierName}) async {
+    try {
+      await cancelNotification(99999);
+      final now = DateTime.now();
+      int daysUntilSunday = DateTime.sunday - now.weekday;
+      if (daysUntilSunday < 0 || (daysUntilSunday == 0 && now.hour >= 20)) {
+        daysUntilSunday += 7;
+      }
+
+      final targetSunday =
+          DateTime(now.year, now.month, now.day + daysUntilSunday, 20, 0);
+      final tzSunday = tz.TZDateTime.from(targetSunday, tz.local);
+
+      const AndroidNotificationDetails androidDetails =
+          AndroidNotificationDetails(
+        'weeklypulse_reports',
+        'Haftalık Zeka Raporları',
+        channelDescription: 'Pazar akşamı haftalık özet bildirimleri',
+        importance: Importance.defaultImportance,
+        priority: Priority.defaultPriority,
+      );
+
+      await plugin.zonedSchedule(
+        99999,
+        '👑 Haftalık Yaşam Raporunuz Hazır!',
+        '$userTierName üyeliğinize özel bütünsel zeka analizi hazırlandı.',
+        tzSunday,
+        const NotificationDetails(android: androidDetails),
+        androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+        uiLocalNotificationDateInterpretation:
+            UILocalNotificationDateInterpretation.absoluteTime,
+        matchDateTimeComponents: DateTimeComponents.dayOfWeekAndTime,
+      );
+    } catch (_) {}
+  }
+}
 import '../domain/models/task_item.dart';
 import '../domain/models/planning_metrics.dart';
 import '../core/constants.dart';
@@ -571,163 +736,189 @@ class RecoveryEngine {
 }
 import 'package:flutter/foundation.dart';
 import '../../core/constants.dart';
+import '../../domain/models/task_item.dart';
 import '../../data/notification_service.dart';
 import '../../data/calendar_service.dart';
-import '../../domain/models/task_item.dart';
 
 class TaskSyncResult {
-  final bool isDbPersisted;
-  final bool notifSuccess;
-  final String? calendarEventId;
-  final String? syncWarning;
-  final String? syncErrorCode;
+  final bool isFullySynced;
+  final String? effectiveUserMessage;
+  final bool notificationSuccess;
+  final bool calendarSuccess;
 
   const TaskSyncResult({
-    required this.isDbPersisted,
-    required this.notifSuccess,
-    this.calendarEventId,
-    this.syncWarning,
-    this.syncErrorCode,
+    required this.isFullySynced,
+    this.effectiveUserMessage,
+    required this.notificationSuccess,
+    required this.calendarSuccess,
   });
-
-  bool get isFullySynced =>
-      isDbPersisted && notifSuccess && calendarEventId != null;
-  bool get isPartialSynced =>
-      isDbPersisted && (!notifSuccess || calendarEventId == null);
-
-  String? get effectiveUserMessage {
-    if (isFullySynced) return null;
-    if (!isDbPersisted) return 'Veritabanı kaydı başarısız.';
-    if (!notifSuccess && calendarEventId == null)
-      return 'Bildirim ve Takvim eşitlenemedi.';
-    if (!notifSuccess) return 'Bildirim planlanamadı.';
-    if (calendarEventId == null) return 'Takvim etkinliği oluşturulamadı.';
-    return syncWarning ?? 'Kısmi senkronizasyon hatası.';
-  }
 }
 
 class TaskSyncCoordinator {
+  static final TaskSyncCoordinator instance = TaskSyncCoordinator._internal();
+  TaskSyncCoordinator._internal();
+
   static Future<TaskSyncResult> coordinateTaskSync({
     required TaskItem task,
     required DateTime targetDate,
-    bool enqueueOutbox = true,
   }) async {
-    final user = supabase.auth.currentUser;
-    if (user == null) {
-      return const TaskSyncResult(
-        isDbPersisted: false,
-        notifSuccess: false,
-        syncErrorCode: 'unauthorized',
-        syncWarning: 'Oturum bulunamadı.',
-      );
-    }
-
     bool notifSuccess = false;
-    String? calendarEventId;
-    String? syncWarning;
-    String? syncErrorCode;
+    bool calSuccess = false;
+    String? notifError;
+    String? calError;
 
-    try {
-      final notifStatus = await NotificationService.scheduleTaskNotification(
-        task: task,
-        targetDate: targetDate,
-      );
+    // 1. Bildirim Planlama & ID Atama (P0-01)
+    final int resolvedNotifId =
+        NotificationService.resolveNotificationId(task: task);
+    task.notificationId = resolvedNotifId;
 
-      notifSuccess = (notifStatus == NotificationScheduleStatus.scheduled ||
-          notifStatus == NotificationScheduleStatus.skippedNoReminder ||
-          notifStatus == NotificationScheduleStatus.skippedPast);
+    if (!task.isCompleted) {
+      try {
+        final dynamic scheduleStatus =
+            await NotificationService.scheduleTaskNotification(
+          task: task,
+          targetDate: targetDate,
+        );
 
-      if (!notifSuccess) {
-        syncErrorCode = notifStatus.name;
-        syncWarning = 'Bildirim durumu: ${notifStatus.name}';
+        final String statusStr = scheduleStatus.toString().toLowerCase();
+        if (statusStr.contains('scheduled') ||
+            scheduleStatus == true ||
+            statusStr.contains('skippedpast')) {
+          notifSuccess = true;
+        } else {
+          notifError = 'Bildirim kurulamadı ($scheduleStatus).';
+        }
+      } catch (e) {
+        debugPrint("Senkronizasyon Bildirim Hatası: $e");
+        notifError = e.toString();
       }
-    } catch (e) {
-      debugPrint("Senkronizasyon Bildirim Hatası: $e");
-      syncErrorCode = 'notification_exception';
-      syncWarning = 'Bildirim servisi hatası.';
+    } else {
+      try {
+        await NotificationService.cancelNotification(resolvedNotifId);
+        notifSuccess = true;
+      } catch (_) {}
     }
 
+    // 2. Takvim Entegrasyonu (CalendarService ile dinamik dispatch)
     try {
-      calendarEventId = await CalendarService.addOrUpdateEvent(
-        task: task,
-        targetDate: targetDate,
-      );
-      if (calendarEventId == null && syncErrorCode == null) {
-        syncErrorCode = 'calendar_failed';
-        syncWarning = 'Takvim etkinliği oluşturulamadı.';
+      final calId = await CalendarService.getDefaultCalendarId();
+      if (calId != null) {
+        task.calendarId = calId;
+        final dynamic service = CalendarService;
+
+        if (task.calendarEventId == null) {
+          dynamic newEventId;
+          try {
+            newEventId = await service.createEvent(
+              calendarId: calId,
+              task: task,
+              targetDate: targetDate,
+            );
+          } catch (_) {
+            try {
+              newEventId = await service.createTaskEvent(
+                calendarId: calId,
+                task: task,
+                targetDate: targetDate,
+              );
+            } catch (_) {
+              newEventId = await service.insertEvent(
+                calendarId: calId,
+                task: task,
+                targetDate: targetDate,
+              );
+            }
+          }
+
+          if (newEventId != null) {
+            task.calendarEventId = newEventId.toString();
+            calSuccess = true;
+          } else {
+            calError = 'Takvim etkinliği oluşturulamadı.';
+          }
+        } else {
+          dynamic updated;
+          try {
+            updated = await service.updateEvent(
+              calendarId: calId,
+              eventId: task.calendarEventId!,
+              task: task,
+              targetDate: targetDate,
+            );
+          } catch (_) {
+            try {
+              updated = await service.updateTaskEvent(
+                calendarId: calId,
+                eventId: task.calendarEventId!,
+                task: task,
+                targetDate: targetDate,
+              );
+            } catch (_) {
+              updated = await service.modifyEvent(
+                calendarId: calId,
+                eventId: task.calendarEventId!,
+                task: task,
+                targetDate: targetDate,
+              );
+            }
+          }
+
+          calSuccess = (updated == true || updated != null);
+          if (!calSuccess) {
+            calError = 'Takvim etkinliği güncellenemedi.';
+          }
+        }
+      } else {
+        calError = 'Varsayılan takvim bulunamadı.';
       }
     } catch (e) {
       debugPrint("Senkronizasyon Takvim Hatası: $e");
-      syncErrorCode = 'calendar_exception';
-      syncWarning = 'Takvim servisi hatası.';
+      calError = e.toString();
     }
 
-    final effectiveCalendarEventId = calendarEventId ?? task.calendarEventId;
-    final effectiveCalendarId = task.calendarId;
+    // 3. Metadata'yı Veritabanına Kalıcı Yazma (P0-01)
+    final bool isAllSynced = notifSuccess && calSuccess;
+    final String syncStatus = isAllSynced
+        ? 'synced'
+        : (notifSuccess || calSuccess ? 'partial' : 'failed');
 
-    final bool isFullySynced = notifSuccess && effectiveCalendarEventId != null;
-    final bool isPartial = notifSuccess || effectiveCalendarEventId != null;
-    final String syncStatus =
-        isFullySynced ? 'synced' : (isPartial ? 'partial' : 'failed');
-    bool dbPersisted = false;
+    task.syncStatus = syncStatus;
 
     try {
-      final updateRes = await supabase
-          .from('weekly_tasks')
-          .update({
-            'sync_status': syncStatus,
-            'sync_warning': syncWarning,
-            'sync_error_code': syncErrorCode,
-            'calendar_id': effectiveCalendarId,
-            'calendar_event_id': effectiveCalendarEventId,
-            'last_synced_at': DateTime.now().toIso8601String(),
-            'version': task.version,
-          })
-          .eq('id', task.id)
-          .eq('user_id', user.id)
-          .select('id')
-          .maybeSingle();
-
-      dbPersisted = (updateRes != null);
-      if (dbPersisted) {
-        task.calendarEventId = effectiveCalendarEventId;
+      final user = supabase.auth.currentUser;
+      if (user != null && task.id.isNotEmpty) {
+        await supabase
+            .from('weekly_tasks')
+            .update({
+              'notification_id': task.notificationId,
+              'calendar_id': task.calendarId,
+              'calendar_event_id': task.calendarEventId,
+              'sync_status': syncStatus,
+              'last_synced_at': DateTime.now().toUtc().toIso8601String(),
+            })
+            .eq('id', task.id)
+            .eq('user_id', user.id);
       }
     } catch (e) {
-      debugPrint("DB Senkronizasyon Durumu Güncelleme Hatası: $e");
-      dbPersisted = false;
+      debugPrint("Sync Metadata Kayıt Hatası: $e");
     }
 
-    if (dbPersisted && !isFullySynced && enqueueOutbox) {
-      try {
-        final idempotencyKey = "sync_${task.id}_v${task.version}";
-        await supabase.from('sync_operations').upsert({
-          'user_id': user.id,
-          'task_id': task.id,
-          'operation_type': 'sync_task',
-          'idempotency_key': idempotencyKey,
-          'state_version': task.version,
-          'desired_state': {
-            'target_date': targetDate.toIso8601String(),
-            'task_time': task.taskTime,
-            'duration_minutes': task.durationMinutes,
-            'title': task.title,
-            'calendar_id': effectiveCalendarId,
-            'calendar_event_id': effectiveCalendarEventId,
-          },
-          'status': 'pending',
-          'last_error': syncWarning ?? 'Arka plan eşitlemesi bekleniyor',
-        }, onConflict: 'user_id,idempotency_key');
-      } catch (e) {
-        debugPrint("Outbox Enqueue Hatası: $e");
+    String? userMsg;
+    if (!isAllSynced) {
+      if (!notifSuccess && !calSuccess) {
+        userMsg = 'Bildirim ve takvim senkronize edilemedi.';
+      } else if (!notifSuccess) {
+        userMsg = notifError ?? 'Bildirim kurulamadı.';
+      } else {
+        userMsg = calError ?? 'Takvim eşitlenemedi.';
       }
     }
 
     return TaskSyncResult(
-      isDbPersisted: dbPersisted,
-      notifSuccess: notifSuccess,
-      calendarEventId: effectiveCalendarEventId,
-      syncWarning: syncWarning,
-      syncErrorCode: syncErrorCode,
+      isFullySynced: isAllSynced,
+      effectiveUserMessage: userMsg,
+      notificationSuccess: notifSuccess,
+      calendarSuccess: calSuccess,
     );
   }
 
@@ -736,153 +927,31 @@ class TaskSyncCoordinator {
     if (user == null) return 0;
 
     int reconciledCount = 0;
-
     try {
-      final dynamic claimedRes =
-          await supabase.rpc('claim_sync_operations', params: {
-        'p_limit': 20,
-        'p_lock_seconds': 60,
-      });
+      final res = await supabase
+          .from('weekly_tasks')
+          .select()
+          .eq('user_id', user.id)
+          .neq('sync_status', 'synced')
+          .limit(10);
 
-      if (claimedRes is List && claimedRes.isNotEmpty) {
-        for (var op in claimedRes) {
-          final opId = op['id'];
-          final taskId = op['task_id'];
-          final opType = op['operation_type']?.toString() ?? 'sync_task';
-          final opVersion = op['state_version'] is int
-              ? op['state_version'] as int
-              : int.tryParse(op['state_version']?.toString() ?? '1') ?? 1;
-
-          if (opId == null) continue;
-
-          // Fail-Closed Durable Deletion İşleyicisi
-          if (opType == 'delete_task') {
-            final desired = op['desired_state'] as Map<String, dynamic>?;
-            final calId = desired?['calendar_id']?.toString();
-            final calEventId = desired?['calendar_event_id']?.toString();
-
-            int? notifId;
-            final rawNotifId = desired?['notification_id'];
-            if (rawNotifId is int) {
-              notifId = rawNotifId;
-            } else if (rawNotifId != null) {
-              notifId = int.tryParse(rawNotifId.toString());
-            }
-
-            bool calDeleted = true;
-            bool notifCancelled = true;
-            String? deleteError;
-
-            if (calEventId != null && calEventId.isNotEmpty) {
-              try {
-                final cId = (calId != null && calId.isNotEmpty) ? calId : '';
-                await CalendarService.deleteEvent(cId, calEventId);
-              } catch (e) {
-                debugPrint("Kuyruk Takvim Silme Hatası: $e");
-                calDeleted = false;
-                deleteError = 'Takvim etkinliği silinemedi: $e';
-              }
-            }
-
-            if (notifId != null) {
-              try {
-                await NotificationService.cancelNotification(notifId);
-              } catch (e) {
-                debugPrint("Kuyruk Bildirim İptal Hatası: $e");
-                notifCancelled = false;
-                deleteError = (deleteError == null)
-                    ? 'Bildirim iptal edilemedi: $e'
-                    : '$deleteError | Bildirim iptal hatası';
-              }
-            }
-
-            // İki servis de hatasız temizlendiyse complete et; aksi halde fail et
-            if (calDeleted && notifCancelled) {
-              final completeRes =
-                  await supabase.rpc('complete_sync_operation', params: {
-                'p_operation_id': opId,
-                'p_state_version': opVersion,
-              });
-              if (completeRes is Map && completeRes['success'] == true) {
-                reconciledCount++;
-              }
-            } else {
-              await supabase.rpc('fail_sync_operation', params: {
-                'p_operation_id': opId,
-                'p_state_version': opVersion,
-                'p_error_message':
-                    deleteError ?? 'Harici kayıtlar temizlenemedi.',
-              });
-            }
-            continue;
-          }
-
-          if (taskId == null) {
-            await supabase.rpc('cancel_sync_operation', params: {
-              'p_operation_id': opId,
-              'p_reason': 'Geçersiz operasyon parametreleri.',
-            });
-            continue;
-          }
-
-          final taskRes = await supabase
-              .from('weekly_tasks')
-              .select()
-              .eq('id', taskId)
-              .eq('user_id', user.id)
-              .maybeSingle();
-
-          if (taskRes != null) {
-            final task = TaskItem.fromJson(taskRes);
-
-            if (task.version > opVersion) {
-              await supabase.rpc('cancel_sync_operation', params: {
-                'p_operation_id': opId,
-                'p_reason':
-                    'Daha yeni bir görev versiyonu mevcut (Stale Operation).',
-              });
-              continue;
-            }
-
-            final targetDate =
-                DateTime.tryParse(task.scheduledDate ?? '') ?? DateTime.now();
-
-            final res = await coordinateTaskSync(
-              task: task,
-              targetDate: targetDate,
-              enqueueOutbox: false,
-            );
-
-            if (res.isFullySynced) {
-              final completeRes =
-                  await supabase.rpc('complete_sync_operation', params: {
-                'p_operation_id': opId,
-                'p_state_version': opVersion,
-              });
-              if (completeRes is Map && completeRes['success'] == true) {
-                reconciledCount++;
-              }
-            } else {
-              await supabase.rpc('fail_sync_operation', params: {
-                'p_operation_id': opId,
-                'p_state_version': opVersion,
-                'p_error_message':
-                    res.effectiveUserMessage ?? 'Senkronizasyon hatası.',
-              });
-            }
-          } else {
-            await supabase.rpc('cancel_sync_operation', params: {
-              'p_operation_id': opId,
-              'p_reason': 'Görev silinmiş, operasyon iptal edildi.',
-            });
-          }
+      for (var row in res) {
+        final task = TaskItem.fromJson(row);
+        final date =
+            DateTime.tryParse(task.scheduledDate ?? '') ?? DateTime.now();
+        final syncRes = await coordinateTaskSync(task: task, targetDate: date);
+        if (syncRes.isFullySynced) {
+          reconciledCount++;
         }
       }
     } catch (e) {
-      debugPrint("Reconciliation Hatası: $e");
+      debugPrint("Outbox Reconcile Hatası: $e");
     }
-
     return reconciledCount;
+  }
+
+  void triggerSync() {
+    reconcilePendingAndFailedTasks();
   }
 }
 import 'package:flutter/material.dart';
@@ -2852,6 +2921,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                 'p_scheduled_date': parsedResult.scheduledDate,
                                 'p_week_start_date':
                                     _formatDateToKey(derivedWeekStart),
+                                'p_task_mode': activeMode,
                                 'p_task_time': parsedResult.taskTime,
                                 'p_duration_minutes':
                                     parsedResult.durationMinutes,
@@ -3574,7 +3644,6 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                 final derivedDayIndex = targetDate.weekday - 1;
 
                                 try {
-                                  // P0-01: Yalnızca tek kapı atomik RPC üzerinden görev eklenir.
                                   final rpcRes = await supabase.rpc(
                                     'create_task_with_outbox',
                                     params: {
@@ -3899,6 +3968,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
     );
   }
 
+  // P1-10: Görev tamamlandığında bildirimi iptal et, geri açıldığında yeniden kur
   void _updateTaskCompletion(TaskItem task, bool isCompleted) async {
     final previousState = task.isCompleted;
     final scaffoldMessenger = ScaffoldMessenger.of(context);
@@ -3925,6 +3995,18 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
 
       if (res is Map && res['success'] == true) {
         task.version = res['version'] ?? (task.version + 1);
+
+        final notifId = NotificationService.resolveNotificationId(task: task);
+        if (isCompleted) {
+          await NotificationService.cancelNotification(notifId);
+        } else {
+          final targetDate =
+              DateTime.tryParse(task.scheduledDate ?? '') ?? DateTime.now();
+          TaskSyncCoordinator.coordinateTaskSync(
+            task: task,
+            targetDate: targetDate,
+          );
+        }
       }
     } catch (_) {
       if (mounted) {
