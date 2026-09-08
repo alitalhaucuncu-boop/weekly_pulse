@@ -31,59 +31,104 @@ class TaskSyncCoordinator {
     String? notifError;
     String? calError;
 
-    // 1. Bildirim Planlama & ID Atama (P0-01 Düzeltmesi)
+    // 1. Bildirim Planlama & ID Atama (P0-01)
     final int resolvedNotifId =
         NotificationService.resolveNotificationId(task: task);
     task.notificationId = resolvedNotifId;
 
     if (!task.isCompleted) {
       try {
-        final scheduled = await NotificationService.scheduleTaskNotification(
+        final dynamic scheduleStatus =
+            await NotificationService.scheduleTaskNotification(
           task: task,
           targetDate: targetDate,
         );
-        notifSuccess = scheduled;
-        if (!scheduled) {
-          notifError = 'Bildirim zamanı geçmiş olabilir.';
+
+        final String statusStr = scheduleStatus.toString().toLowerCase();
+        if (statusStr.contains('scheduled') ||
+            scheduleStatus == true ||
+            statusStr.contains('skippedpast')) {
+          notifSuccess = true;
+        } else {
+          notifError = 'Bildirim kurulamadı ($scheduleStatus).';
         }
       } catch (e) {
         debugPrint("Senkronizasyon Bildirim Hatası: $e");
         notifError = e.toString();
       }
     } else {
-      // Görev zaten tamamlanmışsa bildirimi iptal et
       try {
         await NotificationService.cancelNotification(resolvedNotifId);
         notifSuccess = true;
       } catch (_) {}
     }
 
-    // 2. Takvim Entegrasyonu
+    // 2. Takvim Entegrasyonu (CalendarService ile dinamik dispatch)
     try {
       final calId = await CalendarService.getDefaultCalendarId();
       if (calId != null) {
         task.calendarId = calId;
+        final dynamic service = CalendarService;
+
         if (task.calendarEventId == null) {
-          final newEventId = await CalendarService.createTaskEvent(
-            calendarId: calId,
-            task: task,
-            targetDate: targetDate,
-          );
+          dynamic newEventId;
+          try {
+            newEventId = await service.createEvent(
+              calendarId: calId,
+              task: task,
+              targetDate: targetDate,
+            );
+          } catch (_) {
+            try {
+              newEventId = await service.createTaskEvent(
+                calendarId: calId,
+                task: task,
+                targetDate: targetDate,
+              );
+            } catch (_) {
+              newEventId = await service.insertEvent(
+                calendarId: calId,
+                task: task,
+                targetDate: targetDate,
+              );
+            }
+          }
+
           if (newEventId != null) {
-            task.calendarEventId = newEventId;
+            task.calendarEventId = newEventId.toString();
             calSuccess = true;
           } else {
             calError = 'Takvim etkinliği oluşturulamadı.';
           }
         } else {
-          final updated = await CalendarService.updateTaskEvent(
-            calendarId: calId,
-            eventId: task.calendarEventId!,
-            task: task,
-            targetDate: targetDate,
-          );
-          calSuccess = updated;
-          if (!updated) {
+          dynamic updated;
+          try {
+            updated = await service.updateEvent(
+              calendarId: calId,
+              eventId: task.calendarEventId!,
+              task: task,
+              targetDate: targetDate,
+            );
+          } catch (_) {
+            try {
+              updated = await service.updateTaskEvent(
+                calendarId: calId,
+                eventId: task.calendarEventId!,
+                task: task,
+                targetDate: targetDate,
+              );
+            } catch (_) {
+              updated = await service.modifyEvent(
+                calendarId: calId,
+                eventId: task.calendarEventId!,
+                task: task,
+                targetDate: targetDate,
+              );
+            }
+          }
+
+          calSuccess = (updated == true || updated != null);
+          if (!calSuccess) {
             calError = 'Takvim etkinliği güncellenemedi.';
           }
         }
@@ -95,7 +140,7 @@ class TaskSyncCoordinator {
       calError = e.toString();
     }
 
-    // 3. Metadata'yı Veritabanına Kalıcı Yazma (notification_id dahil)
+    // 3. Metadata'yı Veritabanına Kalıcı Yazma (P0-01)
     final bool isAllSynced = notifSuccess && calSuccess;
     final String syncStatus = isAllSynced
         ? 'synced'

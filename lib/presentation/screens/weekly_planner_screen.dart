@@ -1759,7 +1759,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                         const Text('Son Teslim (Deadline):',
                             style: TextStyle(fontWeight: FontWeight.bold)),
                         Row(
-                          mainAxisSize: dynamic;
+                          mainAxisSize: MainAxisSize.min,
                           children: [
                             OutlinedButton.icon(
                               icon: const Icon(Icons.event_available, size: 18),
@@ -2577,7 +2577,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
     );
   }
 
-  // P1-10 DÜZELTMESİ: Tamamlanan görev için bildirim iptali, geri alınırsa yeniden kurma
+  // P1-10: Görev tamamlandığında bildirimi iptal et, geri açıldığında yeniden kur
   void _updateTaskCompletion(TaskItem task, bool isCompleted) async {
     final previousState = task.isCompleted;
     final scaffoldMessenger = ScaffoldMessenger.of(context);
@@ -2605,13 +2605,10 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
       if (res is Map && res['success'] == true) {
         task.version = res['version'] ?? (task.version + 1);
 
-        // Bildirim senkronizasyonunu anında yönet
         final notifId = NotificationService.resolveNotificationId(task: task);
         if (isCompleted) {
-          // Görev tamamlandıysa yaklaşan bildirimi hemen iptal et
           await NotificationService.cancelNotification(notifId);
         } else {
-          // Görev tekrar açıldıysa ve gelecekteyse bildirimi yeniden planla
           final targetDate =
               DateTime.tryParse(task.scheduledDate ?? '') ?? DateTime.now();
           TaskSyncCoordinator.coordinateTaskSync(
