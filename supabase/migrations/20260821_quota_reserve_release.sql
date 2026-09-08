@@ -1,20 +1,27 @@
--- AI Kota Tablosu Güncellemesi ve Idempotent RPC'ler
--- P0-03, P0-04, P0-05 Düzeltmeleri
+-- WeeklyPulse Canonical AI Quota & Refund RPCs
+-- P0-03, P0-04, P0-05, P0-07 Düzeltmeleri
 
--- Tablo şemasına status kolonu ekleme (eğer yoksa)
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM information_schema.columns 
-        WHERE table_schema = 'public' 
-        AND table_name = 'ai_quota_logs' 
-        AND column_name = 'status'
-    ) THEN
-        ALTER TABLE public.ai_quota_logs ADD COLUMN status text DEFAULT 'consumed';
-    END IF;
-END $$;
+DROP FUNCTION IF EXISTS public.consume_ai_quota(text);
+DROP FUNCTION IF EXISTS public.refund_ai_quota(text);
 
--- Tek Canonical consume_ai_quota Tanımı
+CREATE TABLE IF NOT EXISTS public.ai_quota_logs (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    request_id text NOT NULL,
+    status text NOT NULL DEFAULT 'consumed',
+    created_at timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT unique_user_ai_request UNIQUE (user_id, request_id)
+);
+
+ALTER TABLE public.ai_quota_logs ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Users can read own ai quota logs" ON public.ai_quota_logs;
+CREATE POLICY "Users can read own ai quota logs"
+ON public.ai_quota_logs FOR SELECT
+TO authenticated
+USING (auth.uid() = user_id);
+
+-- Tek Canonical consume_ai_quota (P0-03 & P0-04)
 CREATE OR REPLACE FUNCTION public.consume_ai_quota(
     p_request_id text
 )
@@ -34,7 +41,6 @@ BEGIN
         RETURN jsonb_build_object('success', false, 'message', 'Oturum açılmamış.');
     END IF;
 
-    -- Aynı request daha önce işlendiyse doğrudan mevcut durumu dön (Idempotency)
     SELECT * INTO v_existing_log 
     FROM public.ai_quota_logs 
     WHERE user_id = v_user_id AND request_id = p_request_id;
@@ -68,7 +74,6 @@ BEGIN
         WHERE id = v_user_id;
     END IF;
 
-    -- Unique(user_id, request_id) ile tam uyumlu insert
     INSERT INTO public.ai_quota_logs (
         request_id,
         user_id,
@@ -89,7 +94,7 @@ BEGIN
 END;
 $$;
 
--- Guarded ve Idempotent refund_ai_quota Tanımı (P0-05)
+-- Guarded ve Idempotent refund_ai_quota (P0-05)
 CREATE OR REPLACE FUNCTION public.refund_ai_quota(
     p_request_id text
 )
@@ -109,7 +114,6 @@ BEGIN
         RETURN jsonb_build_object('success', false, 'message', 'Oturum açılmamış.');
     END IF;
 
-    -- Yalnızca daha önce consume edilmiş log kaydını kilitle
     SELECT * INTO v_log
     FROM public.ai_quota_logs
     WHERE user_id = v_user_id AND request_id = p_request_id
@@ -120,14 +124,12 @@ BEGIN
     END IF;
 
     IF v_log.status = 'refunded' THEN
-        -- Daha önce zaten iade edilmişse güvenli no-op dön
         SELECT ai_usage INTO v_usage FROM public.profiles WHERE id = v_user_id;
         RETURN jsonb_build_object('success', true, 'ai_usage', v_usage, 'message', 'Zaten iade edilmiş.');
     END IF;
 
     SELECT is_premium INTO v_is_premium FROM public.profiles WHERE id = v_user_id FOR UPDATE;
 
-    -- Yalnızca premium olmayan kullanıcıların kota sayacını azalt
     IF NOT v_is_premium THEN
         UPDATE public.profiles
         SET ai_usage = GREATEST(0, ai_usage - 1)
