@@ -1,44 +1,31 @@
--- WeeklyPulse Canonical Production Migration
--- Şema, Kısıtlamalar, Temizlik ve Çekirdek RPC'ler
+-- 1. MEVCUT CANLI ŞEMA DÜZELTMELERİ (P0-03, P0-05, P1-05)
 
--- 1. ESKİ FONKSİYONLARI VE POLİTİKALARI TEMİZLE (Overload Ambiguity Önleme)
-DROP FUNCTION IF EXISTS public.save_task_mutation(uuid, text, text, integer, text, text, text, integer, text, timestamptz, text, boolean);
-DROP FUNCTION IF EXISTS public.save_task_mutation(uuid, text, text, integer, text, text, text, integer, text, timestamptz, text, boolean, integer);
-DROP FUNCTION IF EXISTS public.create_voice_task_with_quota(text, text, text, integer, text, text, text, integer, text, timestamptz, text);
-DROP FUNCTION IF EXISTS public.create_voice_task_with_quota(text, text, text, integer, text, text, text, integer, text, timestamptz, text, text);
-
--- 2. TABLO KISITLAMALARI (CHECK CONSTRAINTS)
+-- weekly_tasks kısıtlamaları
 DO $$
 BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint WHERE conname = 'check_weekly_tasks_mode'
-    ) THEN
-        ALTER TABLE public.weekly_tasks
-        ADD CONSTRAINT check_weekly_tasks_mode CHECK (task_mode IN ('student', 'pro'));
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'check_weekly_tasks_mode') THEN
+        ALTER TABLE public.weekly_tasks ADD CONSTRAINT check_weekly_tasks_mode CHECK (task_mode IN ('student', 'pro'));
     END IF;
 
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint WHERE conname = 'check_weekly_tasks_priority'
-    ) THEN
-        ALTER TABLE public.weekly_tasks
-        ADD CONSTRAINT check_weekly_tasks_priority CHECK (priority IN ('Düşük', 'Orta', 'Yüksek', 'Kritik'));
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'check_weekly_tasks_priority') THEN
+        ALTER TABLE public.weekly_tasks ADD CONSTRAINT check_weekly_tasks_priority CHECK (priority IN ('Düşük', 'Orta', 'Yüksek', 'Kritik'));
     END IF;
 
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint WHERE conname = 'check_weekly_tasks_duration'
-    ) THEN
-        ALTER TABLE public.weekly_tasks
-        ADD CONSTRAINT check_weekly_tasks_duration CHECK (duration_minutes BETWEEN 15 AND 480);
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'check_weekly_tasks_duration') THEN
+        ALTER TABLE public.weekly_tasks ADD CONSTRAINT check_weekly_tasks_duration CHECK (duration_minutes BETWEEN 15 AND 480);
     END IF;
 END $$;
 
--- 3. SYNC_OPERATIONS ŞEMA & POLİTİKA GÜVENCESİ (P0-03 & P0-06)
+-- profiles tablosuna last_usage_week ekle (yoksa)
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS last_usage_week text;
+
+-- sync_operations tablosunu onar
 CREATE TABLE IF NOT EXISTS public.sync_operations (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
-    task_id uuid REFERENCES public.weekly_tasks(id) ON DELETE CASCADE,
+    task_id uuid REFERENCES public.weekly_tasks(id) ON DELETE SET NULL,
     operation_type text NOT NULL,
-    idempotency_key text NOT NULL UNIQUE,
+    idempotency_key text NOT NULL,
     desired_state jsonb NOT NULL DEFAULT '{}'::jsonb,
     state_version integer NOT NULL DEFAULT 1,
     status text NOT NULL DEFAULT 'pending',
@@ -51,21 +38,56 @@ CREATE TABLE IF NOT EXISTS public.sync_operations (
     updated_at timestamptz NOT NULL DEFAULT now()
 );
 
-ALTER TABLE public.sync_operations ENABLE ROW LEVEL SECURITY;
+-- Kolonları güvenceye al
+ALTER TABLE public.sync_operations ADD COLUMN IF NOT EXISTS desired_state jsonb NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE public.sync_operations ADD COLUMN IF NOT EXISTS state_version integer NOT NULL DEFAULT 1;
 
+-- FK ON DELETE CASCADE yerine SET NULL yap (P1-05)
+ALTER TABLE public.sync_operations DROP CONSTRAINT IF EXISTS sync_operations_task_id_fkey;
+ALTER TABLE public.sync_operations 
+ADD CONSTRAINT sync_operations_task_id_fkey 
+FOREIGN KEY (task_id) REFERENCES public.weekly_tasks(id) ON DELETE SET NULL;
+
+-- Global unique kısıtlamasını kaldır, USER-SCOPED UNIQUE yap (P0-03)
+ALTER TABLE public.sync_operations DROP CONSTRAINT IF EXISTS sync_operations_idempotency_key_key;
+ALTER TABLE public.sync_operations DROP CONSTRAINT IF EXISTS unique_user_outbox_key;
+ALTER TABLE public.sync_operations 
+ADD CONSTRAINT unique_user_outbox_key UNIQUE (user_id, idempotency_key);
+
+-- RLS İzolasyonu (P0-06)
+ALTER TABLE public.sync_operations ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS "Users can manage their own sync operations" ON public.sync_operations;
 DROP POLICY IF EXISTS "sync_operations_user_policy" ON public.sync_operations;
 DROP POLICY IF EXISTS "Users can insert their own sync operations" ON public.sync_operations;
 DROP POLICY IF EXISTS "Users can update their own sync operations" ON public.sync_operations;
 DROP POLICY IF EXISTS "Users can only read their sync operations" ON public.sync_operations;
 
--- Kesin kural: Authenticated istemci yalnızca SELECT yapabilir
 CREATE POLICY "Users can only read their sync operations"
 ON public.sync_operations FOR SELECT
 TO authenticated
 USING (auth.uid() = user_id);
 
--- 4. CANONICAL save_task_mutation RPC (P0-01, P0-04, P0-05)
+-- ai_quota_logs tablosunu onar (P0-04, P0-05)
+CREATE TABLE IF NOT EXISTS public.ai_quota_logs (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    request_id text NOT NULL,
+    status text NOT NULL DEFAULT 'consumed',
+    created_at timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT unique_user_ai_request UNIQUE (user_id, request_id)
+);
+
+ALTER TABLE public.ai_quota_logs ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'consumed';
+ALTER TABLE public.ai_quota_logs ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Users can read own ai quota logs" ON public.ai_quota_logs;
+CREATE POLICY "Users can read own ai quota logs"
+ON public.ai_quota_logs FOR SELECT
+TO authenticated
+USING (auth.uid() = user_id);
+
+-- 2. CANONICAL RPC FONKSİYONLARI
+
+-- save_task_mutation (CAS + Atomic Outbox)
 CREATE OR REPLACE FUNCTION public.save_task_mutation(
     p_task_id uuid,
     p_title text,
@@ -92,13 +114,13 @@ DECLARE
     v_updated_task record;
     v_idempotency_key text;
     v_desired_state jsonb;
+    v_outbox_id uuid;
 BEGIN
     v_user_id := auth.uid();
     IF v_user_id IS NULL THEN
         RETURN jsonb_build_object('success', false, 'code', 'UNAUTHORIZED', 'message', 'Oturum bulunamadı.');
     END IF;
 
-    -- Süre ve başlık doğrulaması (DB constraint 15-480 ile tam uyumlu)
     IF trim(p_title) = '' OR length(p_title) > 200 THEN
         RETURN jsonb_build_object('success', false, 'code', 'INVALID_TITLE', 'message', 'Geçersiz görev başlığı.');
     END IF;
@@ -116,7 +138,6 @@ BEGIN
         RETURN jsonb_build_object('success', false, 'code', 'NOT_FOUND', 'message', 'Görev bulunamadı.');
     END IF;
 
-    -- Compare-and-Swap Kontrolü
     IF p_expected_version IS NOT NULL AND v_current_task.version <> p_expected_version THEN
         RETURN jsonb_build_object(
             'success', false,
@@ -145,7 +166,6 @@ BEGIN
     WHERE id = p_task_id AND user_id = v_user_id
     RETURNING * INTO v_updated_task;
 
-    -- sync_operations Şemasına Birebir Uyumlu Outbox Insert (desired_state & idempotency_key)
     v_idempotency_key := 'mutation_' || p_task_id::text || '_' || v_updated_task.version::text;
     v_desired_state := jsonb_build_object(
         'task_id', p_task_id,
@@ -174,7 +194,13 @@ BEGIN
         v_desired_state,
         v_updated_task.version,
         'pending'
-    ) ON CONFLICT (idempotency_key) DO NOTHING;
+    ) ON CONFLICT (user_id, idempotency_key) DO UPDATE
+    SET desired_state = EXCLUDED.desired_state, updated_at = now()
+    RETURNING id INTO v_outbox_id;
+
+    IF v_outbox_id IS NULL THEN
+        RAISE EXCEPTION 'Outbox kaydı oluşturulamadı.';
+    END IF;
 
     RETURN jsonb_build_object(
         'success', true,
@@ -184,7 +210,7 @@ BEGIN
 END;
 $$;
 
--- 5. CANONICAL create_voice_task_with_quota RPC (P0-02 & P0-06)
+-- create_voice_task_with_quota (P0-01 Lock-Safe Atomic Claim & Rollover)
 CREATE OR REPLACE FUNCTION public.create_voice_task_with_quota(
     p_request_id text,
     p_title text,
@@ -213,15 +239,31 @@ DECLARE
     v_effective_mode text;
     v_clamped_duration integer;
     v_existing_task record;
-    v_idempotency_key text;
-    v_desired_state jsonb;
+    v_current_week text;
+    v_last_usage_week text;
+    v_outbox_id uuid;
 BEGIN
     v_user_id := auth.uid();
     IF v_user_id IS NULL THEN
         RETURN jsonb_build_object('success', false, 'message', 'Oturum açılmamış.');
     END IF;
 
-    -- İdempotensi Kontrolü: Aynı p_request_id daha önce işlendiyse görevi dön
+    IF trim(p_request_id) = '' THEN
+        RETURN jsonb_build_object('success', false, 'message', 'Geçersiz istek kimliği.');
+    END IF;
+
+    -- 1. ÖNCE PROFİL SATIRINI KİLİTLE (Concurrency Lock Sıralaması - P0-01)
+    SELECT is_premium, voice_usage, last_usage_week 
+    INTO v_is_premium, v_voice_usage, v_last_usage_week
+    FROM public.profiles
+    WHERE id = v_user_id
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('success', false, 'message', 'Kullanıcı profili bulunamadı.');
+    END IF;
+
+    -- 2. KİLİTTEN SONRA İDEMPOTENSİ KONTROLÜ (Yarışı kesin olarak engeller)
     SELECT * INTO v_existing_task 
     FROM public.sync_operations 
     WHERE user_id = v_user_id AND idempotency_key = p_request_id;
@@ -231,21 +273,21 @@ BEGIN
         RETURN jsonb_build_object('success', true, 'task', to_jsonb(v_new_task), 'idempotent_replay', true);
     END IF;
 
-    v_effective_mode := CASE WHEN p_task_mode = 'pro' THEN 'pro' ELSE 'student' END;
-    v_clamped_duration := LEAST(GREATEST(p_duration_minutes, 15), 480);
-
-    SELECT is_premium, voice_usage INTO v_is_premium, v_voice_usage
-    FROM public.profiles
-    WHERE id = v_user_id
-    FOR UPDATE;
-
-    IF NOT FOUND THEN
-        RETURN jsonb_build_object('success', false, 'message', 'Kullanıcı profili bulunamadı.');
+    -- 3. HAFTALIK SIFIRLAMA KONTROLÜ (Rollover - P1-04)
+    v_current_week := to_char(now(), 'IYYY-IW');
+    IF v_last_usage_week IS DISTINCT FROM v_current_week THEN
+        v_voice_usage := 0;
+        UPDATE public.profiles 
+        SET voice_usage = 0, ai_usage = 0, last_usage_week = v_current_week 
+        WHERE id = v_user_id;
     END IF;
 
     IF NOT v_is_premium AND v_voice_usage >= 3 THEN
         RETURN jsonb_build_object('success', false, 'message', 'Haftalık sesli komut kotanız doldu.');
     END IF;
+
+    v_effective_mode := CASE WHEN p_task_mode = 'pro' THEN 'pro' ELSE 'student' END;
+    v_clamped_duration := LEAST(GREATEST(p_duration_minutes, 15), 480);
 
     INSERT INTO public.weekly_tasks (
         user_id,
@@ -282,16 +324,6 @@ BEGIN
     ) RETURNING * INTO v_new_task;
 
     v_task_id := v_new_task.id;
-    v_idempotency_key := p_request_id;
-    v_desired_state := jsonb_build_object(
-        'task_id', v_task_id,
-        'title', trim(p_title),
-        'scheduled_date', p_scheduled_date,
-        'task_time', p_task_time,
-        'duration_minutes', v_clamped_duration,
-        'task_mode', v_effective_mode,
-        'version', 1
-    );
 
     INSERT INTO public.sync_operations (
         task_id,
@@ -305,11 +337,23 @@ BEGIN
         v_task_id,
         v_user_id,
         'create',
-        v_idempotency_key,
-        v_desired_state,
+        p_request_id,
+        jsonb_build_object(
+            'task_id', v_task_id,
+            'title', trim(p_title),
+            'scheduled_date', p_scheduled_date,
+            'task_time', p_task_time,
+            'duration_minutes', v_clamped_duration,
+            'task_mode', v_effective_mode,
+            'version', 1
+        ),
         1,
         'pending'
-    ) ON CONFLICT (idempotency_key) DO NOTHING;
+    ) RETURNING id INTO v_outbox_id;
+
+    IF v_outbox_id IS NULL THEN
+        RAISE EXCEPTION 'Sesli görev outbox kaydı oluşturulamadı.';
+    END IF;
 
     IF NOT v_is_premium THEN
         UPDATE public.profiles
@@ -320,6 +364,154 @@ BEGIN
     RETURN jsonb_build_object(
         'success', true,
         'task', to_jsonb(v_new_task)
+    );
+END;
+$$;
+
+-- consume_ai_quota (P0-02 Lock-Safe Atomic Claim & Rollover)
+CREATE OR REPLACE FUNCTION public.consume_ai_quota(
+    p_request_id text
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+    v_user_id uuid;
+    v_is_premium boolean;
+    v_ai_usage integer;
+    v_existing_log record;
+    v_current_week text;
+    v_last_usage_week text;
+BEGIN
+    v_user_id := auth.uid();
+    IF v_user_id IS NULL THEN
+        RETURN jsonb_build_object('success', false, 'message', 'Oturum açılmamış.');
+    END IF;
+
+    IF trim(p_request_id) = '' THEN
+        RETURN jsonb_build_object('success', false, 'message', 'Geçersiz istek kimliği.');
+    END IF;
+
+    -- 1. ÖNCE PROFİL SATIRINI KİLİTLE (Concurrency Lock Sıralaması - P0-02)
+    SELECT is_premium, ai_usage, last_usage_week 
+    INTO v_is_premium, v_ai_usage, v_last_usage_week
+    FROM public.profiles
+    WHERE id = v_user_id
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('success', false, 'message', 'Profil bulunamadı.');
+    END IF;
+
+    -- 2. KİLİTTEN SONRA LOG KONTROLÜ (Çift kota tüketimini önler)
+    SELECT * INTO v_existing_log 
+    FROM public.ai_quota_logs 
+    WHERE user_id = v_user_id AND request_id = p_request_id;
+
+    IF FOUND THEN
+        RETURN jsonb_build_object(
+            'success', true,
+            'ai_usage', v_ai_usage,
+            'is_premium', v_is_premium,
+            'idempotent_replay', true
+        );
+    END IF;
+
+    -- 3. HAFTALIK SIFIRLAMA KONTROLÜ (Rollover - P1-01)
+    v_current_week := to_char(now(), 'IYYY-IW');
+    IF v_last_usage_week IS DISTINCT FROM v_current_week THEN
+        v_ai_usage := 0;
+        UPDATE public.profiles 
+        SET ai_usage = 0, voice_usage = 0, last_usage_week = v_current_week 
+        WHERE id = v_user_id;
+    END IF;
+
+    IF NOT v_is_premium AND v_ai_usage >= 1 THEN
+        RETURN jsonb_build_object('success', false, 'message', 'Haftalık Akıllı Analiz kotanız doldu.');
+    END IF;
+
+    -- 4. ÖNCE LOGU ATOMİK YAZ (Atomic Claim)
+    INSERT INTO public.ai_quota_logs (
+        request_id,
+        user_id,
+        status,
+        created_at
+    ) VALUES (
+        p_request_id,
+        v_user_id,
+        'consumed',
+        now()
+    );
+
+    IF NOT v_is_premium THEN
+        UPDATE public.profiles
+        SET ai_usage = ai_usage + 1
+        WHERE id = v_user_id;
+    END IF;
+
+    RETURN jsonb_build_object(
+        'success', true,
+        'ai_usage', CASE WHEN v_is_premium THEN 0 ELSE v_ai_usage + 1 END,
+        'is_premium', v_is_premium
+    );
+END;
+$$;
+
+-- refund_ai_quota (P0-05)
+CREATE OR REPLACE FUNCTION public.refund_ai_quota(
+    p_request_id text
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+    v_user_id uuid;
+    v_is_premium boolean;
+    v_usage integer;
+    v_log record;
+BEGIN
+    v_user_id := auth.uid();
+    IF v_user_id IS NULL THEN
+        RETURN jsonb_build_object('success', false, 'message', 'Oturum açılmamış.');
+    END IF;
+
+    SELECT * INTO v_log
+    FROM public.ai_quota_logs
+    WHERE user_id = v_user_id AND request_id = p_request_id
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('success', false, 'message', 'İade edilecek tüketim kaydı bulunamadı.');
+    END IF;
+
+    IF v_log.status = 'refunded' THEN
+        SELECT ai_usage INTO v_usage FROM public.profiles WHERE id = v_user_id;
+        RETURN jsonb_build_object('success', true, 'ai_usage', v_usage, 'message', 'Zaten iade edilmiş.');
+    END IF;
+
+    SELECT is_premium INTO v_is_premium FROM public.profiles WHERE id = v_user_id FOR UPDATE;
+
+    IF NOT v_is_premium THEN
+        UPDATE public.profiles
+        SET ai_usage = GREATEST(0, ai_usage - 1)
+        WHERE id = v_user_id
+        RETURNING ai_usage INTO v_usage;
+    ELSE
+        v_usage := 0;
+    END IF;
+
+    UPDATE public.ai_quota_logs
+    SET status = 'refunded'
+    WHERE user_id = v_user_id AND request_id = p_request_id;
+
+    RETURN jsonb_build_object(
+        'success', true,
+        'ai_usage', v_usage,
+        'message', 'Kota başarıyla iade edildi.'
     );
 END;
 $$;

@@ -10,6 +10,7 @@ class TaskSyncResult {
   final bool isFullySynced;
   final String? effectiveUserMessage;
   final bool notificationSuccess;
+  final bool notificationSkippedPast;
   final CalendarSyncStatus calendarStatus;
   final bool isVersionConflict;
 
@@ -17,6 +18,7 @@ class TaskSyncResult {
     required this.isFullySynced,
     this.effectiveUserMessage,
     required this.notificationSuccess,
+    this.notificationSkippedPast = false,
     required this.calendarStatus,
     this.isVersionConflict = false,
   });
@@ -31,12 +33,13 @@ class TaskSyncCoordinator {
     required DateTime targetDate,
   }) async {
     bool notifSuccess = false;
+    bool notifSkippedPast = false;
     CalendarSyncStatus calStatus = CalendarSyncStatus.unavailable;
     String? notifError;
     String? calError;
     bool isConflict = false;
 
-    // 1. Bildirim Senkronizasyonu & Kalıcı ID Atama[cite: 4]
+    // 1. Bildirim Senkronizasyonu (P1-06: skippedPast ayrımı)
     final int resolvedNotifId =
         NotificationService.resolveNotificationId(task: task);
     task.notificationId = resolvedNotifId;
@@ -50,10 +53,12 @@ class TaskSyncCoordinator {
         );
 
         final String statusStr = scheduleStatus.toString().toLowerCase();
-        if (statusStr.contains('scheduled') ||
-            scheduleStatus == true ||
-            statusStr.contains('skippedpast')) {
+        if (statusStr.contains('scheduled') || scheduleStatus == true) {
           notifSuccess = true;
+        } else if (statusStr.contains('skippedpast')) {
+          notifSkippedPast = true;
+          notifSuccess = false; // Geçmiş saat başarısız değil ama kurulmadı
+          notifError = 'Görev saati geçmiş olduğu için bildirim kurulmadı.';
         } else {
           notifError = 'Bildirim kurulamadı ($scheduleStatus).';
         }
@@ -68,7 +73,7 @@ class TaskSyncCoordinator {
       } catch (_) {}
     }
 
-    // 2. Takvim Entegrasyonu: Typed Doğrudan Çağrı (P1-01 Düzeltmesi)[cite: 4]
+    // 2. Takvim Entegrasyonu (Typed Direct Call)
     try {
       final calId = await CalendarService.getDefaultCalendarId();
       if (calId == null || calId.isEmpty) {
@@ -95,15 +100,17 @@ class TaskSyncCoordinator {
       calError = 'Takvim hatası: $e';
     }
 
-    // 3. Senkronizasyon Durumu Hesabı (Capability-Aware)
+    // 3. Durum Değerlendirmesi: Bildirim kuruldu veya gelecek planlandıysa synced[cite: 5]
     final bool calOk = (calStatus == CalendarSyncStatus.synced ||
         calStatus == CalendarSyncStatus.skippedByUser);
     final bool isAllSynced = notifSuccess && calOk;
-    final String syncStatus = isAllSynced ? 'synced' : 'failed';
+    final String syncStatus = isAllSynced
+        ? 'synced'
+        : (notifSkippedPast && calOk ? 'partial' : 'failed');
 
     task.syncStatus = syncStatus;
 
-    // 4. Metadata Güncellemesi & Zero-Row Kontrolü (P0-04)[cite: 4]
+    // 4. Metadata Güncellemesi & Zero-Row Kontrolü[cite: 5]
     try {
       final user = supabase.auth.currentUser;
       if (user != null && task.id.isNotEmpty) {
@@ -136,6 +143,8 @@ class TaskSyncCoordinator {
     String? userMsg;
     if (isConflict) {
       userMsg = 'Görev versiyonu eski, senkronizasyon askıya alındı.';
+    } else if (notifSkippedPast) {
+      userMsg = 'Plan kaydedildi (Zamanı geçmiş bildirim planlanmadı).';
     } else if (!isAllSynced) {
       userMsg = notifError ?? calError ?? 'Senkronizasyon başarısız oldu.';
     }
@@ -144,6 +153,7 @@ class TaskSyncCoordinator {
       isFullySynced: isAllSynced && !isConflict,
       effectiveUserMessage: userMsg,
       notificationSuccess: notifSuccess,
+      notificationSkippedPast: notifSkippedPast,
       calendarStatus: calStatus,
       isVersionConflict: isConflict,
     );
