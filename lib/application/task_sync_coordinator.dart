@@ -40,7 +40,6 @@ class TaskSyncCoordinator {
     bool isConflict = false;
     bool isNetworkOrDbError = false;
 
-    // 1. Bildirim Senkronizasyonu
     final int resolvedNotifId =
         NotificationService.resolveNotificationId(task: task);
     task.notificationId = resolvedNotifId;
@@ -74,7 +73,6 @@ class TaskSyncCoordinator {
       } catch (_) {}
     }
 
-    // 2. Takvim Entegrasyonu
     try {
       final calId = await CalendarService.getDefaultCalendarId();
       if (calId == null || calId.isEmpty) {
@@ -101,7 +99,6 @@ class TaskSyncCoordinator {
       calError = 'Takvim hatası: $e';
     }
 
-    // 3. Durum Değerlendirmesi
     final bool calOk = (calStatus == CalendarSyncStatus.synced ||
         calStatus == CalendarSyncStatus.skippedByUser);
     final bool isAllSynced = notifSuccess && calOk;
@@ -111,7 +108,6 @@ class TaskSyncCoordinator {
 
     task.syncStatus = syncStatus;
 
-    // 4. Metadata Güncellemesi
     try {
       final user = supabase.auth.currentUser;
       if (user != null && task.id.isNotEmpty) {
@@ -162,21 +158,21 @@ class TaskSyncCoordinator {
     );
   }
 
-  // P0 ÇÖZÜMÜ: Yanıltıcı completed çağrısı kaldırıldı; side-effect bazlı gerçek raporlama
+  // P1: Atomic Claim & Trust-Boundary Verification Reconcile
   static Future<int> reconcilePendingAndFailedTasks() async {
     final user = supabase.auth.currentUser;
     if (user == null) return 0;
 
     int reconciledCount = 0;
 
-    // 1. Silinmiş görevlerin dış temizliğini yürüt ve gerçek başarı durumuna göre RPC'ye bildir
     try {
-      final deleteOps = await supabase
-          .from('sync_operations')
-          .select()
-          .eq('user_id', user.id)
-          .eq('operation_type', 'delete')
-          .inFilter('status', ['pending', 'partial']).limit(10);
+      // 1. İşlemleri lease ile atomik olarak claim et (P1)
+      final dynamic claimResult = await supabase.rpc(
+        'claim_pending_delete_operations',
+        params: {'p_limit': 10, 'p_lease_seconds': 60},
+      );
+
+      final List<dynamic> deleteOps = (claimResult is List) ? claimResult : [];
 
       for (var op in deleteOps) {
         final desired = op['desired_state'] as Map<String, dynamic>?;
@@ -185,42 +181,51 @@ class TaskSyncCoordinator {
           final calId = desired['calendar_id'] as String?;
           final eventId = desired['calendar_event_id'] as String?;
 
-          bool notifDeleted = true;
-          bool calDeleted = true;
+          String notifStatus = 'skipped';
+          String calStatus = 'skipped';
+          String? verifiedEventId;
           String? errorMessage;
 
           // Bildirim temizliği
           if (notifId != null) {
             try {
               await NotificationService.cancelNotification(notifId);
+              notifStatus = 'client_acknowledged';
             } catch (e) {
-              notifDeleted = false;
-              errorMessage = "Bildirim iptal edilemedi: $e";
-              debugPrint("Reconcile Bildirim İptal Hatası: $e");
+              notifStatus = 'failed';
+              errorMessage = "Bildirim iptal hatası: $e";
             }
           }
 
-          // Takvim temizliği
+          // Takvim temizliği ve teyidi
           if (calId != null && eventId != null) {
             try {
-              await CalendarService.deleteEvent(calId, eventId);
+              final ok = await CalendarService.deleteEvent(calId, eventId);
+              if (ok) {
+                calStatus = 'provider_verified';
+                verifiedEventId = eventId;
+              } else {
+                calStatus = 'failed';
+                errorMessage = (errorMessage != null)
+                    ? "$errorMessage; Takvim silme başarısız"
+                    : "Takvim silme başarısız";
+              }
             } catch (e) {
-              calDeleted = false;
+              calStatus = 'failed';
               errorMessage = (errorMessage != null)
-                  ? "$errorMessage; Takvim etkinliği silinemedi: $e"
-                  : "Takvim etkinliği silinemedi: $e";
-              debugPrint("Reconcile Takvim Silme Hatası: $e");
+                  ? "$errorMessage; Takvim hatası: $e"
+                  : "Takvim hatası: $e";
             }
           }
 
-          // P0 DÜZELTMESİ: Sonuçları doğrudan veritabanına raporla.
-          // Yalnızca ikisi de başarılıysa status='completed' olur; biri başarısızsa status='partial' kalır ve retryable olur.
+          // 2. Doğrulanmış side effect raporu gönder (P0)
           try {
             final res =
                 await supabase.rpc('report_delete_side_effects', params: {
               'p_operation_id': op['id'],
-              'p_notification_success': notifDeleted,
-              'p_calendar_success': calDeleted,
+              'p_notification_status': notifStatus,
+              'p_calendar_status': calStatus,
+              'p_verified_event_id': verifiedEventId,
               'p_error_message': errorMessage,
             });
 
@@ -233,10 +238,10 @@ class TaskSyncCoordinator {
         }
       }
     } catch (e) {
-      debugPrint("Durable Delete Outbox Worker Hatası: $e");
+      debugPrint("Durable Delete Claim Hatası: $e");
     }
 
-    // 2. Mevcut görevlerin bekleyen eşitlenmelerini tamamla
+    // 3. Görevlerin bekleyen eşitlemelerini tamamla
     try {
       final res = await supabase
           .from('weekly_tasks')
