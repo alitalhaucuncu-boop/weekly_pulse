@@ -620,10 +620,106 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                       },
                     ),
                   ),
+                  const SizedBox(height: 8),
+                  SizedBox(
+                    width: double.infinity,
+                    height: 44,
+                    child: TextButton.icon(
+                      style: TextButton.styleFrom(
+                          foregroundColor: Colors.redAccent),
+                      icon: const Icon(Icons.delete_forever, size: 20),
+                      label: const Text('Hesabımı Kalıcı Olarak Sil',
+                          style: TextStyle(
+                              fontSize: 12, fontWeight: FontWeight.w600)),
+                      onPressed: () {
+                        Navigator.pop(modalContext);
+                        _confirmDeleteAccount();
+                      },
+                    ),
+                  ),
                 ],
               ),
             );
           },
+        );
+      },
+    );
+  }
+
+  void _confirmDeleteAccount() {
+    showDialog(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          title: const Text('Hesabı Kalıcı Olarak Sil 🚨',
+              style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 18,
+                  color: Colors.redAccent)),
+          content: const Text(
+            'Hesabınızı ve kaydedilen tüm haftalık planlarınızı, bildirimlerinizi kalıcı olarak silmek istediğinize emin misiniz? Bu işlem geri alınamaz.',
+            style: TextStyle(fontSize: 13, color: Colors.grey),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Vazgeç'),
+            ),
+            ElevatedButton(
+              style:
+                  ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
+              onPressed: () async {
+                final scaffoldMessenger = ScaffoldMessenger.of(context);
+                final navigator = Navigator.of(context);
+                try {
+                  final res = await supabase.rpc('delete_user_account');
+                  final bool ok = res is Map && res['success'] == true;
+
+                  if (ok) {
+                    await supabase.auth.signOut();
+                    if (!mounted) return;
+                    Navigator.pop(dialogContext);
+                    navigator.pushReplacement(
+                      MaterialPageRoute(
+                        builder: (_) => AuthScreen(
+                          onThemeToggle: widget.onThemeToggle,
+                          isDark: widget.isDark,
+                        ),
+                      ),
+                    );
+                    scaffoldMessenger.showSnackBar(
+                      const SnackBar(
+                          content: Text(
+                              'Hesabınız ve tüm verileriniz başarıyla silindi.')),
+                    );
+                  } else {
+                    if (mounted) {
+                      Navigator.pop(dialogContext);
+                      scaffoldMessenger.showSnackBar(
+                        SnackBar(
+                            content: Text((res is Map)
+                                ? (res['message'] ?? 'Silme başarısız.')
+                                : 'Silme başarısız.')),
+                      );
+                    }
+                  }
+                } catch (e) {
+                  debugPrint("Hesap Silme Hatası: $e");
+                  if (mounted) {
+                    Navigator.pop(dialogContext);
+                    scaffoldMessenger.showSnackBar(
+                      SnackBar(content: Text('Hata oluştu: $e')),
+                    );
+                  }
+                }
+              },
+              child: const Text('Evet, Kalıcı Olarak Sil',
+                  style: TextStyle(
+                      color: Colors.white, fontWeight: FontWeight.bold)),
+            ),
+          ],
         );
       },
     );
@@ -1127,42 +1223,44 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
     String lower = speechText.toLowerCase();
 
     DateTime now = DateTime.now();
-    int detectedDayIndex = (selectedDayIndex < 0 || selectedDayIndex >= 7)
-        ? (now.weekday - 1)
-        : selectedDayIndex;
+    DateTime todayMidnight = DateTime(now.year, now.month, now.day);
+    DateTime targetDate = todayMidnight;
 
-    DateTime targetDate = now;
-
-    if (RegExp(r'\bcumartesi\b').hasMatch(lower)) {
-      detectedDayIndex = 5;
-      targetDate = currentWeekMonday.add(const Duration(days: 5));
-    } else if (RegExp(r'\bpazartesi\b').hasMatch(lower)) {
-      detectedDayIndex = 0;
-      targetDate = currentWeekMonday.add(const Duration(days: 0));
-    } else if (RegExp(r'\bçarşamba\b').hasMatch(lower)) {
-      detectedDayIndex = 2;
-      targetDate = currentWeekMonday.add(const Duration(days: 2));
-    } else if (RegExp(r'\bperşembe\b').hasMatch(lower)) {
-      detectedDayIndex = 3;
-      targetDate = currentWeekMonday.add(const Duration(days: 3));
-    } else if (RegExp(r'\bcuma\b').hasMatch(lower)) {
-      detectedDayIndex = 4;
-      targetDate = currentWeekMonday.add(const Duration(days: 4));
+    int targetWeekday = -1;
+    if (RegExp(r'\bpazartesi\b').hasMatch(lower)) {
+      targetWeekday = DateTime.monday;
     } else if (RegExp(r'\bsalı\b').hasMatch(lower)) {
-      detectedDayIndex = 1;
-      targetDate = currentWeekMonday.add(const Duration(days: 1));
+      targetWeekday = DateTime.tuesday;
+    } else if (RegExp(r'\bçarşamba\b').hasMatch(lower)) {
+      targetWeekday = DateTime.wednesday;
+    } else if (RegExp(r'\bperşembe\b').hasMatch(lower)) {
+      targetWeekday = DateTime.thursday;
+    } else if (RegExp(r'\bcuma\b').hasMatch(lower)) {
+      targetWeekday = DateTime.friday;
+    } else if (RegExp(r'\bcumartesi\b').hasMatch(lower)) {
+      targetWeekday = DateTime.saturday;
     } else if (RegExp(r'\bpazar\b').hasMatch(lower)) {
-      detectedDayIndex = 6;
-      targetDate = currentWeekMonday.add(const Duration(days: 6));
-    } else if (RegExp(r'\byarın\b').hasMatch(lower)) {
-      targetDate = now.add(const Duration(days: 1));
-      detectedDayIndex = targetDate.weekday - 1;
-    } else if (RegExp(r'\bbugün\b').hasMatch(lower)) {
-      targetDate = now;
-      detectedDayIndex = now.weekday - 1;
-    } else {
-      targetDate = currentWeekMonday.add(Duration(days: detectedDayIndex));
+      targetWeekday = DateTime.sunday;
     }
+
+    if (targetWeekday != -1) {
+      int diff = targetWeekday - todayMidnight.weekday;
+      if (diff <= 0) {
+        diff += 7;
+      }
+      targetDate = todayMidnight.add(Duration(days: diff));
+    } else if (RegExp(r'\byarın\b').hasMatch(lower)) {
+      targetDate = todayMidnight.add(const Duration(days: 1));
+    } else if (RegExp(r'\bbugün\b').hasMatch(lower)) {
+      targetDate = todayMidnight;
+    } else {
+      int safeIndex = (selectedDayIndex < 0 || selectedDayIndex >= 7)
+          ? (now.weekday - 1)
+          : selectedDayIndex;
+      targetDate = currentWeekMonday.add(Duration(days: safeIndex));
+    }
+
+    int detectedDayIndex = targetDate.weekday - 1;
 
     final durationResult = VoiceDurationParser.parse(lower);
     int detectedDuration = durationResult.durationMinutes;
@@ -1953,6 +2051,8 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                       'p_reminder_time': selectedReminder,
                                       'p_is_completed': task.isCompleted,
                                       'p_expected_version': task.version,
+                                      'p_request_id':
+                                          'mutation_${task.id}_${task.version + 1}',
                                     },
                                   );
 
@@ -2530,6 +2630,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
           'p_reminder_time': task.reminderTime,
           'p_is_completed': task.isCompleted,
           'p_expected_version': task.version,
+          'p_request_id': 'move_${task.id}_${task.version + 1}',
         },
       );
 
@@ -2712,6 +2813,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
           'p_reminder_time': task.reminderTime,
           'p_is_completed': isCompleted,
           'p_expected_version': task.version,
+          'p_request_id': 'complete_${task.id}_${task.version + 1}',
         },
       );
 
