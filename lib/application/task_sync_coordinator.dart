@@ -162,22 +162,21 @@ class TaskSyncCoordinator {
     );
   }
 
-  // P0 ÇÖZÜMÜ: complete_delete_operation RPC çağrısı ile RLS UPDATE engelini aşma
+  // P0 ÇÖZÜMÜ: Yanıltıcı completed çağrısı kaldırıldı; side-effect bazlı gerçek raporlama
   static Future<int> reconcilePendingAndFailedTasks() async {
     final user = supabase.auth.currentUser;
     if (user == null) return 0;
 
     int reconciledCount = 0;
 
-    // 1. Silinmiş görevlerin dış temizlik kayıtlarını işle ve RPC ile tamamlandı işaretle
+    // 1. Silinmiş görevlerin dış temizliğini yürüt ve gerçek başarı durumuna göre RPC'ye bildir
     try {
       final deleteOps = await supabase
           .from('sync_operations')
           .select()
           .eq('user_id', user.id)
           .eq('operation_type', 'delete')
-          .eq('status', 'pending')
-          .limit(10);
+          .inFilter('status', ['pending', 'partial']).limit(10);
 
       for (var op in deleteOps) {
         final desired = op['desired_state'] as Map<String, dynamic>?;
@@ -186,25 +185,50 @@ class TaskSyncCoordinator {
           final calId = desired['calendar_id'] as String?;
           final eventId = desired['calendar_event_id'] as String?;
 
+          bool notifDeleted = true;
+          bool calDeleted = true;
+          String? errorMessage;
+
+          // Bildirim temizliği
           if (notifId != null) {
             try {
               await NotificationService.cancelNotification(notifId);
-            } catch (_) {}
+            } catch (e) {
+              notifDeleted = false;
+              errorMessage = "Bildirim iptal edilemedi: $e";
+              debugPrint("Reconcile Bildirim İptal Hatası: $e");
+            }
           }
+
+          // Takvim temizliği
           if (calId != null && eventId != null) {
             try {
               await CalendarService.deleteEvent(calId, eventId);
-            } catch (_) {}
+            } catch (e) {
+              calDeleted = false;
+              errorMessage = (errorMessage != null)
+                  ? "$errorMessage; Takvim etkinliği silinemedi: $e"
+                  : "Takvim etkinliği silinemedi: $e";
+              debugPrint("Reconcile Takvim Silme Hatası: $e");
+            }
           }
 
-          // Direct table update yerine ownership kontrollü RPC çağrısı (P0)
+          // P0 DÜZELTMESİ: Sonuçları doğrudan veritabanına raporla.
+          // Yalnızca ikisi de başarılıysa status='completed' olur; biri başarısızsa status='partial' kalır ve retryable olur.
           try {
-            await supabase.rpc('complete_delete_operation', params: {
+            final res =
+                await supabase.rpc('report_delete_side_effects', params: {
               'p_operation_id': op['id'],
+              'p_notification_success': notifDeleted,
+              'p_calendar_success': calDeleted,
+              'p_error_message': errorMessage,
             });
-            reconciledCount++;
+
+            if (res is Map && res['status'] == 'completed') {
+              reconciledCount++;
+            }
           } catch (rpcErr) {
-            debugPrint("Delete Operation Complete RPC Hatası: $rpcErr");
+            debugPrint("Delete Side Effect Raporlama Hatası: $rpcErr");
           }
         }
       }
@@ -212,7 +236,7 @@ class TaskSyncCoordinator {
       debugPrint("Durable Delete Outbox Worker Hatası: $e");
     }
 
-    // 2. Mevcut görevlerin bekleyen senkronizasyonlarını tamamla
+    // 2. Mevcut görevlerin bekleyen eşitlenmelerini tamamla
     try {
       final res = await supabase
           .from('weekly_tasks')

@@ -1,5 +1,5 @@
--- WeeklyPulse Canonical Production Migration v15
--- Kapsam: complete_delete_operation Yetki & State Machine, Karantina Tablosu ve Idempotent Delete
+-- WeeklyPulse Canonical Production Migration v17
+-- Kapsam: Side-Effect Specific Delete Reporting RPC, Quarantine RLS & Robust State Transition
 
 -- 1. TABLO KISITLAMALARI VE PROFİL
 DO $$
@@ -19,7 +19,7 @@ END $$;
 
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS last_usage_week text;
 
--- 2. KARANTİNA VE ARŞİV TABLOSU GÜVENCESİ (P0: Rastgele UUID Backfill Kaldırıldı)
+-- 2. KARANTİNA TABLOSU VE RLS GÜVENCESİ (P1-03)
 CREATE TABLE IF NOT EXISTS public.sync_operations_quarantine (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     archive_id uuid,
@@ -28,6 +28,17 @@ CREATE TABLE IF NOT EXISTS public.sync_operations_quarantine (
     created_at timestamptz NOT NULL DEFAULT now()
 );
 
+ALTER TABLE public.sync_operations_quarantine ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Service role and admins manage quarantine" ON public.sync_operations_quarantine;
+-- Karantina tablosu güvenlik izolasyonu: authenticated kullanıcılar doğrudan erişemez, yalnızca service_role okur/yazar
+CREATE POLICY "Service role and admins manage quarantine"
+ON public.sync_operations_quarantine
+FOR ALL
+TO service_role
+USING (true)
+WITH CHECK (true);
+
+-- 3. ARŞİV TABLOSU GÜVENCESİ
 CREATE TABLE IF NOT EXISTS public.sync_operations_archive (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     original_operation_id uuid,
@@ -53,7 +64,6 @@ ALTER TABLE public.sync_operations_archive ADD COLUMN IF NOT EXISTS attempts int
 ALTER TABLE public.sync_operations_archive ADD COLUMN IF NOT EXISTS archived_at timestamptz DEFAULT now();
 ALTER TABLE public.sync_operations_archive ADD COLUMN IF NOT EXISTS archive_reason text DEFAULT 'duplicate_resolution';
 
--- Rastgele UUID üretmek yerine sahipsiz kayıtları karantinaya al
 INSERT INTO public.sync_operations_quarantine (archive_id, raw_payload, quarantine_reason)
 SELECT id, to_jsonb(a), 'missing_owner_or_operation_provenance'
 FROM public.sync_operations_archive a
@@ -62,7 +72,6 @@ WHERE a.user_id IS NULL OR a.original_operation_id IS NULL;
 DELETE FROM public.sync_operations_archive
 WHERE user_id IS NULL OR original_operation_id IS NULL;
 
--- Temizlenen arşiv tablosunda NOT NULL constraint garantisi
 ALTER TABLE public.sync_operations_archive ALTER COLUMN original_operation_id SET NOT NULL;
 ALTER TABLE public.sync_operations_archive ALTER COLUMN user_id SET NOT NULL;
 ALTER TABLE public.sync_operations_archive ALTER COLUMN operation_type SET NOT NULL;
@@ -74,7 +83,7 @@ ON public.sync_operations_archive FOR SELECT
 TO authenticated
 USING (auth.uid() = user_id);
 
--- 3. SYNC_OPERATIONS ANA TABLO VE UNIQUE KISITLAMALARI
+-- 4. SYNC_OPERATIONS ANA TABLO VE KESİN UNIQUE INDEX
 CREATE TABLE IF NOT EXISTS public.sync_operations (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
@@ -115,25 +124,12 @@ WHERE idempotency_key IS NULL OR trim(idempotency_key) = '';
 
 ALTER TABLE public.sync_operations ALTER COLUMN idempotency_key SET NOT NULL;
 
-DO $$
-DECLARE
-    r RECORD;
-BEGIN
-    FOR r IN (
-        SELECT c.conname
-        FROM pg_constraint c
-        JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY(c.conkey)
-        WHERE c.conrelid = 'public.sync_operations'::regclass
-          AND c.contype = 'u'
-          AND a.attname = 'idempotency_key'
-    ) LOOP
-        EXECUTE 'ALTER TABLE public.sync_operations DROP CONSTRAINT IF EXISTS ' || quote_ident(r.conname);
-    END LOOP;
-END $$;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_operations_user_idempotency
+ON public.sync_operations (user_id, idempotency_key);
 
 ALTER TABLE public.sync_operations DROP CONSTRAINT IF EXISTS unique_user_outbox_key;
 ALTER TABLE public.sync_operations 
-ADD CONSTRAINT unique_user_outbox_key UNIQUE (user_id, idempotency_key);
+ADD CONSTRAINT unique_user_outbox_key UNIQUE USING INDEX idx_sync_operations_user_idempotency;
 
 ALTER TABLE public.sync_operations ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS "Users can only read their sync operations" ON public.sync_operations;
@@ -142,7 +138,7 @@ ON public.sync_operations FOR SELECT
 TO authenticated
 USING (auth.uid() = user_id);
 
--- 4. USER_QUOTA_LEDGER KESİN NOT NULL & CONSTRAINT PARITY
+-- 5. USER_QUOTA_LEDGER KESİN NOT NULL & CONSTRAINT PARITY
 CREATE TABLE IF NOT EXISTS public.user_quota_ledger (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
@@ -190,9 +186,12 @@ ON public.user_quota_ledger FOR SELECT
 TO authenticated
 USING (auth.uid() = user_id);
 
--- 5. CANONICAL complete_delete_operation RPC (P0: Sıkı Operation Type & State Transition Koruması)
-CREATE OR REPLACE FUNCTION public.complete_delete_operation(
-    p_operation_id uuid
+-- 6. P0 ÇÖZÜMÜ: SIDE-EFFECT SPECIFIC DELETE REPORTING RPC
+CREATE OR REPLACE FUNCTION public.report_delete_side_effects(
+    p_operation_id uuid,
+    p_notification_success boolean,
+    p_calendar_success boolean,
+    p_error_message text DEFAULT NULL
 )
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -202,6 +201,8 @@ AS $$
 DECLARE
     v_user_id uuid;
     v_op record;
+    v_new_status text;
+    v_is_all_success boolean;
 BEGIN
     v_user_id := auth.uid();
     IF v_user_id IS NULL THEN
@@ -214,40 +215,72 @@ BEGIN
     FOR UPDATE;
 
     IF NOT FOUND THEN
-        RETURN jsonb_build_object('success', false, 'code', 'NOT_FOUND', 'message', 'İşlem bulunamadı.');
+        RETURN jsonb_build_object('success', false, 'code', 'NOT_FOUND', 'message', 'Operasyon bulunamadı.');
     END IF;
 
-    -- P0: Yalnızca delete türündeki operasyonlara izin ver
     IF v_op.operation_type <> 'delete' THEN
-        RETURN jsonb_build_object(
-            'success', false,
-            'code', 'INVALID_OPERATION_TYPE',
-            'message', 'Bu fonksiyon yalnızca silme operasyonlarını tamamlamak içindir.'
-        );
+        RETURN jsonb_build_object('success', false, 'code', 'INVALID_OPERATION_TYPE', 'message', 'Yalnızca silme operasyonları raporlanabilir.');
     END IF;
 
-    -- P0: State machine kontrolü
     IF v_op.status = 'completed' THEN
-        RETURN jsonb_build_object('success', true, 'message', 'İşlem zaten tamamlanmış.', 'idempotent_replay', true);
+        RETURN jsonb_build_object('success', true, 'message', 'Operasyon zaten tamamlanmış.', 'idempotent_replay', true);
     END IF;
 
-    IF v_op.status NOT IN ('pending', 'processing', 'partial') THEN
+    v_is_all_success := (p_notification_success AND p_calendar_success);
+
+    IF v_is_all_success THEN
+        v_new_status := 'completed';
+        UPDATE public.sync_operations
+        SET status = 'completed',
+            desired_state = jsonb_set(
+                jsonb_set(desired_state, '{notification_status}', '"completed"'),
+                '{calendar_status}', '"completed"'
+            ),
+            updated_at = now(),
+            last_error = NULL
+        WHERE id = p_operation_id AND user_id = v_user_id;
+
+        RETURN jsonb_build_object('success', true, 'status', 'completed', 'message', 'Silme dış temizliği başarıyla tamamlandı.');
+    ELSE
+        -- Kısmi veya başarısız durum: completed yapılmaz, partial/retryable bırakılır
+        v_new_status := 'partial';
+        UPDATE public.sync_operations
+        SET status = 'partial',
+            attempt_count = attempt_count + 1,
+            next_retry_at = now() + interval '5 minutes',
+            last_error = p_error_message,
+            desired_state = jsonb_set(
+                jsonb_set(desired_state, '{notification_status}', to_jsonb(CASE WHEN p_notification_success THEN 'completed' ELSE 'failed' END)),
+                '{calendar_status}', to_jsonb(CASE WHEN p_calendar_success THEN 'completed' ELSE 'failed' END)
+            ),
+            updated_at = now()
+        WHERE id = p_operation_id AND user_id = v_user_id;
+
         RETURN jsonb_build_object(
             'success', false,
-            'code', 'INVALID_STATE_TRANSITION',
-            'message', 'Bu durumdaki operasyon tamamlanamaz.'
+            'status', 'partial',
+            'code', 'SIDE_EFFECT_INCOMPLETE',
+            'message', 'Dış temizlik adımlarından en az biri başarısız oldu, yeniden denenecek.'
         );
     END IF;
-
-    UPDATE public.sync_operations
-    SET status = 'completed', updated_at = now()
-    WHERE id = p_operation_id AND user_id = v_user_id;
-
-    RETURN jsonb_build_object('success', true, 'message', 'Silme işlemi başarıyla tamamlandı.');
 END;
 $$;
 
--- 6. CANONICAL delete_task_durable RPC (P1: Concurrency-Safe Lock Sonrası Idempotency)
+-- Geriye dönük uyumluluk için complete_delete_operation RPC'si korundu, fakat side-effect durumunu kontrol eder
+CREATE OR REPLACE FUNCTION public.complete_delete_operation(
+    p_operation_id uuid
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+    RETURN public.report_delete_side_effects(p_operation_id, true, true, NULL);
+END;
+$$;
+
+-- 7. CANONICAL delete_task_durable RPC
 CREATE OR REPLACE FUNCTION public.delete_task_durable(
     p_task_id uuid
 )
@@ -267,13 +300,11 @@ BEGIN
         RETURN jsonb_build_object('success', false, 'code', 'UNAUTHORIZED', 'message', 'Oturum bulunamadı.');
     END IF;
 
-    -- 1. Görevi kilitle
     SELECT * INTO v_task
     FROM public.weekly_tasks
     WHERE id = p_task_id AND user_id = v_user_id
     FOR UPDATE;
 
-    -- 2. Görev bulunamadıysa (aynı anda başka istek silmiş olabilir), kilit sonrası outbox'ı kontrol et
     IF NOT FOUND THEN
         SELECT * INTO v_existing_op
         FROM public.sync_operations
@@ -286,7 +317,6 @@ BEGIN
         RETURN jsonb_build_object('success', false, 'code', 'NOT_FOUND', 'message', 'Görev bulunamadı.');
     END IF;
 
-    -- 3. Dış temizlik kaydı oluştur
     INSERT INTO public.sync_operations (
         task_id,
         user_id,
@@ -304,7 +334,9 @@ BEGIN
             'deleted_task_id', p_task_id,
             'notification_id', v_task.notification_id,
             'calendar_id', v_task.calendar_id,
-            'calendar_event_id', v_task.calendar_event_id
+            'calendar_event_id', v_task.calendar_event_id,
+            'notification_status', 'pending',
+            'calendar_status', 'pending'
         ),
         v_task.version,
         'pending'
@@ -323,7 +355,7 @@ BEGIN
 END;
 $$;
 
--- 7. DİĞER CANONICAL RPC'LER
+-- 8. SAVE_TASK_MUTATION RPC
 CREATE OR REPLACE FUNCTION public.save_task_mutation(
     p_task_id uuid,
     p_title text,
@@ -453,6 +485,7 @@ BEGIN
 END;
 $$;
 
+-- 9. CREATE_VOICE_TASK_WITH_QUOTA RPC
 CREATE OR REPLACE FUNCTION public.create_voice_task_with_quota(
     p_request_id text,
     p_title text,
@@ -627,6 +660,7 @@ BEGIN
 END;
 $$;
 
+-- 10. CONSUME_AI_QUOTA RPC
 CREATE OR REPLACE FUNCTION public.consume_ai_quota(
     p_request_id text
 )
@@ -719,6 +753,7 @@ BEGIN
 END;
 $$;
 
+-- 11. REFUND_AI_QUOTA RPC
 CREATE OR REPLACE FUNCTION public.refund_ai_quota(
     p_request_id text
 )
@@ -783,7 +818,7 @@ BEGIN
 END;
 $$;
 
--- 8. ROLE-BASED ALLOWLIST (P0 Yetkilendirme)
+-- 12. ROLE-BASED ALLOWLIST
 REVOKE ALL ON FUNCTION public.save_task_mutation(uuid, text, text, integer, text, text, text, integer, text, timestamptz, text, boolean, integer) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.save_task_mutation(uuid, text, text, integer, text, text, text, integer, text, timestamptz, text, boolean, integer) TO authenticated;
 
@@ -801,3 +836,6 @@ GRANT EXECUTE ON FUNCTION public.delete_task_durable(uuid) TO authenticated;
 
 REVOKE ALL ON FUNCTION public.complete_delete_operation(uuid) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.complete_delete_operation(uuid) TO authenticated;
+
+REVOKE ALL ON FUNCTION public.report_delete_side_effects(uuid, boolean, boolean, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.report_delete_side_effects(uuid, boolean, boolean, text) TO authenticated;
