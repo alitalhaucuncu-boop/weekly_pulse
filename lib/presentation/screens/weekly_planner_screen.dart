@@ -1200,7 +1200,8 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
     bool hasExplicitTime = false;
 
     for (var entry in timeWordNumbers.entries) {
-      if (textWithoutDuration.contains(entry.key)) {
+      final pattern = RegExp(r'\b' + RegExp.escape(entry.key) + r'\b');
+      if (pattern.hasMatch(textWithoutDuration)) {
         if (textWithoutDuration.contains("${entry.key} buçuk")) {
           parsedHour = entry.value;
           parsedMinute = 30;
@@ -2628,27 +2629,22 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                   allMonthFetchedTasks.removeWhere((t) => t.id == task.id);
                 });
 
+                bool dbDeleteSuccess = false;
                 try {
                   final res = await supabase.rpc(
                     'delete_task_durable',
                     params: {'p_task_id': task.id},
                   );
 
-                  if (res is Map && res['success'] == false) {
-                    throw Exception(
-                        res['message'] ?? 'Silme işlemi başarısız.');
-                  }
-
-                  final int notifIdToCancel =
-                      NotificationService.resolveNotificationId(task: task);
-                  await NotificationService.cancelNotification(notifIdToCancel);
-
-                  if (task.calendarId != null && task.calendarEventId != null) {
-                    await CalendarService.deleteEvent(
-                        task.calendarId!, task.calendarEventId!);
+                  if (res is Map && res['success'] == true) {
+                    dbDeleteSuccess = true;
+                  } else {
+                    throw Exception((res is Map)
+                        ? res['message']
+                        : 'Silme işlemi başarısız.');
                   }
                 } catch (e) {
-                  debugPrint("Silme Hatası: $e");
+                  debugPrint("Veritabanı Silme Hatası: $e");
                   if (mounted) {
                     scaffoldMessenger.showSnackBar(
                       const SnackBar(
@@ -2657,6 +2653,31 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                     );
                   }
                   _fetchTasks();
+                  return;
+                }
+
+                if (dbDeleteSuccess) {
+                  try {
+                    final int notifIdToCancel =
+                        NotificationService.resolveNotificationId(task: task);
+                    await NotificationService.cancelNotification(
+                        notifIdToCancel);
+
+                    if (task.calendarId != null &&
+                        task.calendarEventId != null) {
+                      await CalendarService.deleteEvent(
+                          task.calendarId!, task.calendarEventId!);
+                    }
+                  } catch (e) {
+                    debugPrint("İstemci Temizleme Hatası: $e");
+                    if (mounted) {
+                      scaffoldMessenger.showSnackBar(
+                        const SnackBar(
+                            content: Text(
+                                '⚠️ Görev silindi fakat bildirim/takvim temizlenemedi.')),
+                      );
+                    }
+                  }
                 }
               },
               child: const Text('Sil',
