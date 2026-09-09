@@ -619,3 +619,36 @@ GRANT EXECUTE ON FUNCTION public.report_delete_side_effects(uuid, text, text, te
 
 REVOKE ALL ON FUNCTION public.delete_user_account() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.delete_user_account() TO authenticated;
+-- P0: APPLE & GOOGLE COMPLIANT HARD ACCOUNT DELETION
+CREATE OR REPLACE FUNCTION public.delete_user_account()
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, auth, pg_temp
+AS $$
+DECLARE
+    v_user_id uuid;
+BEGIN
+    v_user_id := auth.uid();
+    IF v_user_id IS NULL THEN
+        RETURN jsonb_build_object('success', false, 'code', 'UNAUTHORIZED', 'message', 'Oturum bulunamadı.');
+    END IF;
+
+    -- 1. Kullanıcıya ait tüm yan tabloları temizle
+    DELETE FROM public.sync_operations WHERE user_id = v_user_id;
+    DELETE FROM public.sync_operations_archive WHERE user_id = v_user_id;
+    DELETE FROM public.user_quota_ledger WHERE user_id = v_user_id;
+    DELETE FROM public.weekly_tasks WHERE user_id = v_user_id;
+    DELETE FROM public.profiles WHERE id = v_user_id;
+
+    -- 2. Doğrudan auth.users kaydını sil (Apple 5.1.1(v) Hard Requirement)
+    DELETE FROM auth.users WHERE id = v_user_id;
+
+    RETURN jsonb_build_object('success', true, 'message', 'Hesabınız ve tüm verileriniz kalıcı olarak silindi.');
+EXCEPTION WHEN OTHERS THEN
+    RETURN jsonb_build_object('success', false, 'code', 'INTERNAL_ERROR', 'message', SQLERRM);
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.delete_user_account() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.delete_user_account() TO authenticated;

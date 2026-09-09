@@ -671,17 +671,24 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
               style:
                   ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
               onPressed: () async {
-                final scaffoldMessenger = ScaffoldMessenger.of(context);
-                final navigator = Navigator.of(context);
                 try {
                   final res = await supabase.rpc('delete_user_account');
                   final bool ok = res is Map && res['success'] == true;
 
                   if (ok) {
+                    try {
+                      await NotificationService.cancelAllNotifications();
+                      final prefs = await SharedPreferences.getInstance();
+                      await prefs.clear();
+                    } catch (_) {}
+
                     await supabase.auth.signOut();
                     if (!mounted) return;
-                    Navigator.pop(dialogContext);
-                    navigator.pushReplacement(
+                    if (dialogContext.mounted) {
+                      Navigator.pop(dialogContext);
+                    }
+                    Navigator.pushReplacement(
+                      context,
                       MaterialPageRoute(
                         builder: (_) => AuthScreen(
                           onThemeToggle: widget.onThemeToggle,
@@ -689,30 +696,32 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                         ),
                       ),
                     );
-                    scaffoldMessenger.showSnackBar(
+                    ScaffoldMessenger.of(context).showSnackBar(
                       const SnackBar(
                           content: Text(
                               'Hesabınız ve tüm verileriniz başarıyla silindi.')),
                     );
                   } else {
-                    if (mounted) {
+                    if (!mounted) return;
+                    if (dialogContext.mounted) {
                       Navigator.pop(dialogContext);
-                      scaffoldMessenger.showSnackBar(
-                        SnackBar(
-                            content: Text((res is Map)
-                                ? (res['message'] ?? 'Silme başarısız.')
-                                : 'Silme başarısız.')),
-                      );
                     }
+                    final String msg = (res is Map && res['message'] != null)
+                        ? res['message']
+                        : 'Silme başarısız.';
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text(msg)),
+                    );
                   }
                 } catch (e) {
                   debugPrint("Hesap Silme Hatası: $e");
-                  if (mounted) {
+                  if (!mounted) return;
+                  if (dialogContext.mounted) {
                     Navigator.pop(dialogContext);
-                    scaffoldMessenger.showSnackBar(
-                      SnackBar(content: Text('Hata oluştu: $e')),
-                    );
                   }
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('Hata oluştu: $e')),
+                  );
                 }
               },
               child: const Text('Evet, Kalıcı Olarak Sil',
@@ -1209,6 +1218,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
   }
 
   void _handleStorePurchase(String tierName, String planId, bool isYearly) {
+    if (!mounted) return;
     Navigator.pop(context);
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
@@ -2834,6 +2844,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
       } else {
         final code = (res is Map) ? res['code'] : null;
         if (code == 'VERSION_CONFLICT') {
+          if (!mounted) return;
           _fetchTasks();
           scaffoldMessenger.showSnackBar(
             const SnackBar(
@@ -2967,7 +2978,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                   child: Padding(
                     padding: const EdgeInsets.all(24.0),
                     child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
+                      mainAxisAlignment: CenterAlignment.center == null
+                          ? MainAxisAlignment.center
+                          : MainAxisAlignment.center,
                       children: [
                         const Icon(Icons.wifi_off,
                             size: 48, color: Colors.grey),

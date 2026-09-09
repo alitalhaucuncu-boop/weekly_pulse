@@ -1,84 +1,104 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:weekly_pulse/domain/models/task_item.dart';
-import 'package:weekly_pulse/domain/parsers/voice_duration_parser.dart';
 import 'package:weekly_pulse/application/planning_engine.dart';
+import 'package:weekly_pulse/domain/parsers/voice_duration_parser.dart';
 
 void main() {
-  group('PlanningEngine & Parser Unit Tests', () {
-    test('VoiceDurationParser Türkçe yazılı süreleri doğru ayrıştırmalı', () {
-      final res1 = VoiceDurationParser.parse('yarın iki saat ders çalışacağım');
-      expect(res1.durationMinutes, 120);
-
-      final res2 = VoiceDurationParser.parse('toplantı yarım saat sürecek');
-      expect(res2.durationMinutes, 30);
-
-      final res3 = VoiceDurationParser.parse('45 dakika mola ver');
-      expect(res3.durationMinutes, 45);
-    });
-
-    test('PlanningEngine kapasite ve doluluk oranını doğru hesaplamalı', () {
+  group('PlanningEngine Unit Tests', () {
+    test('Kapasite kullanımı doğru hesaplanmalı (480 dk baz)', () {
       final tasks = [
         TaskItem(
           id: '1',
           userId: 'u1',
-          title: 'Ders 1',
-          category: 'Akademik',
+          title: 'Görev 1',
+          category: 'İş',
           dayIndex: 0,
-          weekStartDate: '2026-08-17',
-          scheduledDate: '2026-08-17',
+          weekStartDate: '2026-09-07',
           durationMinutes: 120,
+          priority: 'Orta',
         ),
         TaskItem(
           id: '2',
           userId: 'u1',
-          title: 'Ders 2',
-          category: 'Akademik',
+          title: 'Görev 2',
+          category: 'Ders',
           dayIndex: 0,
-          weekStartDate: '2026-08-17',
-          scheduledDate: '2026-08-17',
+          weekStartDate: '2026-09-07',
           durationMinutes: 60,
+          priority: 'Kritik',
         ),
       ];
 
       final metrics = PlanningEngine.calculatePlanningMetricsForDay(tasks);
-      expect(metrics.capacityUsage, greaterThan(0));
+      expect(metrics.capacityUsage, equals(55));
     });
 
-    test('PlanningEngine çakışmaları tespit etmeli', () {
-      final existingTasks = [
-        TaskItem(
-          id: '1',
-          userId: 'u1',
-          title: 'Toplantı 1',
-          category: 'İş',
-          dayIndex: 1,
-          weekStartDate: '2026-08-17',
-          scheduledDate: '2026-08-18',
-          taskTime: '10:00',
-          durationMinutes: 60,
-        ),
-      ];
-
-      final conflictingTask = TaskItem(
-        id: '2',
+    test('Zaman çakışması doğru tespit edilmeli (Interval Overlap)', () {
+      final taskA = TaskItem(
+        id: '1',
         userId: 'u1',
-        title: 'Toplantı 2',
+        title: 'Görev A',
         category: 'İş',
         dayIndex: 1,
-        weekStartDate: '2026-08-17',
-        scheduledDate: '2026-08-18',
+        weekStartDate: '2026-09-07',
+        taskTime: '10:00',
+        durationMinutes: 60,
+      );
+
+      final taskB = TaskItem(
+        id: '2',
+        userId: 'u1',
+        title: 'Görev B',
+        category: 'İş',
+        dayIndex: 1,
+        weekStartDate: '2026-09-07',
         taskTime: '10:30',
         durationMinutes: 60,
       );
 
-      final targetDate = DateTime(2026, 8, 18);
-      final wouldConflict = PlanningEngine.wouldConflictOnTargetDay(
-        conflictingTask,
-        targetDate,
-        existingTasks,
+      final taskC = TaskItem(
+        id: '3',
+        userId: 'u1',
+        title: 'Görev C',
+        category: 'İş',
+        dayIndex: 1,
+        weekStartDate: '2026-09-07',
+        taskTime: '11:00',
+        durationMinutes: 60,
       );
 
-      expect(wouldConflict, true);
+      final targetDate = DateTime(2026, 9, 8);
+      expect(
+        PlanningEngine.wouldConflictOnTargetDay(taskB, targetDate, [taskA]),
+        isTrue,
+      );
+      expect(
+        PlanningEngine.wouldConflictOnTargetDay(taskC, targetDate, [taskA]),
+        isFalse,
+      );
+    });
+  });
+
+  group('VoiceDurationParser Tests (RegExp & Boundaries)', () {
+    test('Kelime sınırı ve süre ayrıştırma testi', () {
+      final res1 = VoiceDurationParser.parse('2 saat ders çalışacağım');
+      expect(res1.durationMinutes, equals(120));
+      expect(res1.validationError, isNull);
+
+      final res2 = VoiceDurationParser.parse('45 dakika mola ver');
+      expect(res2.durationMinutes, equals(45));
+      expect(res2.validationError, isNull);
+
+      final res3 = VoiceDurationParser.parse('birlikte toplantı yapacağız');
+      expect(res3.durationMinutes, equals(60));
+    });
+
+    test('15 - 480 dakika kural sınırları doğrulanmalı', () {
+      final resMin = VoiceDurationParser.parse('10 dakika hızlı tekrar');
+      expect(resMin.validationError, isNotNull);
+
+      final resMax = VoiceDurationParser.parse('10 saat maraton');
+      expect(resMax.validationError, isNotNull);
     });
   });
 }

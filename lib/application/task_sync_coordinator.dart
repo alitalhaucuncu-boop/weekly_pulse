@@ -46,31 +46,32 @@ class TaskSyncCoordinator {
 
     if (!task.isCompleted) {
       try {
-        final dynamic scheduleStatus =
+        final NotificationScheduleResult scheduleStatus =
             await NotificationService.scheduleTaskNotification(
           task: task,
           targetDate: targetDate,
         );
 
-        final String statusStr = scheduleStatus.toString().toLowerCase();
-        if (statusStr.contains('scheduled') || scheduleStatus == true) {
+        if (scheduleStatus == NotificationScheduleResult.scheduled) {
           notifSuccess = true;
-        } else if (statusStr.contains('skippedpast')) {
+        } else if (scheduleStatus ==
+            NotificationScheduleResult.skippedNoReminder) {
+          // P1: Kullanıcı bilinçli olarak hatırlatma istemediğinde başarılı kabul et
+          notifSuccess = true;
+        } else if (scheduleStatus == NotificationScheduleResult.skippedPast) {
           notifSkippedPast = true;
           notifSuccess = false;
           notifError = 'Görev saati geçmiş olduğu için bildirim kurulmadı.';
         } else {
-          notifError = 'Bildirim kurulamadı ($scheduleStatus).';
+          notifError = 'Bildirim kurulamadı.';
         }
       } catch (e) {
         debugPrint("Senkronizasyon Bildirim Hatası: $e");
         notifError = e.toString();
       }
     } else {
-      try {
-        await NotificationService.cancelNotification(resolvedNotifId);
-        notifSuccess = true;
-      } catch (_) {}
+      notifSuccess =
+          await NotificationService.cancelNotification(resolvedNotifId);
     }
 
     try {
@@ -166,7 +167,6 @@ class TaskSyncCoordinator {
     int reconciledCount = 0;
 
     try {
-      // 1. İşlemleri lease_token ile atomik olarak claim et (P0/P1)
       final dynamic claimResult = await supabase.rpc(
         'claim_pending_delete_operations',
         params: {'p_limit': 10, 'p_lease_seconds': 60},
@@ -189,18 +189,19 @@ class TaskSyncCoordinator {
           String? verifiedEventId;
           String? errorMessage;
 
-          // Bildirim temizliği (Whitelist: 'client_acknowledged' | 'failed' | 'skipped')
+          // P1: Notification cancel sonucunu gerçek bool üzerinden kontrol et
           if (notifId != null) {
-            try {
-              await NotificationService.cancelNotification(notifId);
+            final bool cancelled =
+                await NotificationService.cancelNotification(notifId);
+            if (cancelled) {
               notifStatus = 'client_acknowledged';
-            } catch (e) {
+            } else {
               notifStatus = 'failed';
-              errorMessage = "Bildirim iptal hatası: $e";
+              errorMessage = "Bildirim iptal edilemedi.";
             }
           }
 
-          // Takvim temizliği (Whitelist: 'provider_verified' | 'provider_not_found' | 'failed' | 'skipped')
+          // Takvim temizliği ve doğrulaması
           if (calId != null && eventId != null && eventId.isNotEmpty) {
             try {
               final ok = await CalendarService.deleteEvent(calId, eventId);
@@ -221,7 +222,6 @@ class TaskSyncCoordinator {
             }
           }
 
-          // 2. Lease token ve doğrulanmış side-effect ile RPC'yi raporla (P0)
           try {
             final res =
                 await supabase.rpc('report_delete_side_effects', params: {
@@ -245,7 +245,6 @@ class TaskSyncCoordinator {
       debugPrint("Durable Delete Claim Hatası: $e");
     }
 
-    // 3. Görevlerin bekleyen eşitlemelerini tamamla
     try {
       final res = await supabase
           .from('weekly_tasks')
