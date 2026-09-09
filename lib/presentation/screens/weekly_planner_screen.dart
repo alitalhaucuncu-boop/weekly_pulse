@@ -671,6 +671,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
               style:
                   ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
               onPressed: () async {
+                final messenger = ScaffoldMessenger.of(context);
+                final nav = Navigator.of(context);
+
                 try {
                   final res = await supabase.rpc('delete_user_account');
                   final bool ok = res is Map && res['success'] == true;
@@ -687,8 +690,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                     if (dialogContext.mounted) {
                       Navigator.pop(dialogContext);
                     }
-                    Navigator.pushReplacement(
-                      context,
+                    nav.pushReplacement(
                       MaterialPageRoute(
                         builder: (_) => AuthScreen(
                           onThemeToggle: widget.onThemeToggle,
@@ -696,7 +698,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                         ),
                       ),
                     );
-                    ScaffoldMessenger.of(context).showSnackBar(
+                    messenger.showSnackBar(
                       const SnackBar(
                           content: Text(
                               'Hesabınız ve tüm verileriniz başarıyla silindi.')),
@@ -709,7 +711,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                     final String msg = (res is Map && res['message'] != null)
                         ? res['message']
                         : 'Silme başarısız.';
-                    ScaffoldMessenger.of(context).showSnackBar(
+                    messenger.showSnackBar(
                       SnackBar(content: Text(msg)),
                     );
                   }
@@ -719,7 +721,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                   if (dialogContext.mounted) {
                     Navigator.pop(dialogContext);
                   }
-                  ScaffoldMessenger.of(context).showSnackBar(
+                  messenger.showSnackBar(
                     SnackBar(content: Text('Hata oluştu: $e')),
                   );
                 }
@@ -2978,9 +2980,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                   child: Padding(
                     padding: const EdgeInsets.all(24.0),
                     child: Column(
-                      mainAxisAlignment: CenterAlignment.center == null
-                          ? MainAxisAlignment.center
-                          : MainAxisAlignment.center,
+                      mainAxisAlignment: MainAxisAlignment.center,
                       children: [
                         const Icon(Icons.wifi_off,
                             size: 48, color: Colors.grey),
