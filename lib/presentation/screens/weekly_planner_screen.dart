@@ -2844,8 +2844,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                   child: Padding(
                     padding: const EdgeInsets.all(24.0),
                     child: Column(
-                      mainAxisAlignment: Center(child: Text(_taskFetchError!))
-                          .mainAxisAlignment,
+                      mainAxisAlignment: MainAxisAlignment.center,
                       children: [
                         const Icon(Icons.wifi_off,
                             size: 48, color: Colors.grey),
