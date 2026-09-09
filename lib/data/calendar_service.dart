@@ -1,31 +1,55 @@
 import 'package:device_calendar/device_calendar.dart';
 import 'package:flutter/foundation.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:timezone/timezone.dart' as tz;
 import '../domain/models/task_item.dart';
 
 class CalendarService {
   static final DeviceCalendarPlugin _deviceCalendarPlugin =
       DeviceCalendarPlugin();
+  static const String _prefCalendarKey = 'selected_calendar_id';
+
+  static Future<bool> requestPermissions() async {
+    var permissionsGranted = await _deviceCalendarPlugin.hasPermissions();
+    if (permissionsGranted.isSuccess && !permissionsGranted.data!) {
+      permissionsGranted = await _deviceCalendarPlugin.requestPermissions();
+      return permissionsGranted.isSuccess && permissionsGranted.data!;
+    }
+    return permissionsGranted.isSuccess && permissionsGranted.data!;
+  }
+
+  static Future<List<Calendar>> getWritableCalendars() async {
+    final hasPermission = await requestPermissions();
+    if (!hasPermission) return [];
+
+    final calendarsResult = await _deviceCalendarPlugin.retrieveCalendars();
+    if (calendarsResult.isSuccess && calendarsResult.data != null) {
+      return calendarsResult.data!.where((c) => c.isReadOnly == false).toList();
+    }
+    return [];
+  }
+
+  static Future<void> setSelectedCalendarId(String calendarId) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_prefCalendarKey, calendarId);
+  }
 
   static Future<String?> getDefaultCalendarId() async {
-    try {
-      var permissionsGranted = await _deviceCalendarPlugin.hasPermissions();
-      if (permissionsGranted.isSuccess && !(permissionsGranted.data ?? false)) {
-        permissionsGranted = await _deviceCalendarPlugin.requestPermissions();
-        if (!permissionsGranted.isSuccess ||
-            !(permissionsGranted.data ?? false)) {
-          return null;
-        }
-      }
-      final calendarsResult = await _deviceCalendarPlugin.retrieveCalendars();
-      if (calendarsResult.isSuccess && calendarsResult.data != null) {
-        final calendars = calendarsResult.data!;
-        if (calendars.isNotEmpty) {
-          return calendars.first.id;
-        }
-      }
-    } catch (e) {
-      debugPrint("Calendar permission/retrieve error: $e");
+    final prefs = await SharedPreferences.getInstance();
+    final savedId = prefs.getString(_prefCalendarKey);
+    if (savedId != null && savedId.isNotEmpty) {
+      return savedId;
+    }
+
+    final writable = await getWritableCalendars();
+    if (writable.isNotEmpty) {
+      // Birincil veya varsayılan takvimi tercih et
+      final primary = writable.firstWhere(
+        (c) => c.isDefault == true,
+        orElse: () => writable.first,
+      );
+      await setSelectedCalendarId(primary.id!);
+      return primary.id;
     }
     return null;
   }
@@ -35,49 +59,61 @@ class CalendarService {
     required DateTime targetDate,
   }) async {
     try {
-      final calendarId = task.calendarId ?? await getDefaultCalendarId();
+      final calendarId = await getDefaultCalendarId();
       if (calendarId == null) return null;
-      task.calendarId = calendarId;
 
-      int h = 10, m = 0;
-      try {
-        final parts = task.taskTime.split(':');
-        if (parts.length == 2) {
-          h = int.parse(parts[0]);
-          m = int.parse(parts[1]);
-        }
-      } catch (_) {}
-
-      final startDate =
-          DateTime(targetDate.year, targetDate.month, targetDate.day, h, m);
-      final endDate = startDate.add(Duration(minutes: task.durationMinutes));
+      final startTime = task.startDateTime;
+      final start = DateTime(
+        targetDate.year,
+        targetDate.month,
+        targetDate.day,
+        startTime.hour,
+        startTime.minute,
+      );
+      final end = start.add(Duration(minutes: task.durationMinutes));
 
       final event = Event(
         calendarId,
         eventId: task.calendarEventId,
-        title: task.title,
-        description: 'WeeklyPulse Planı: ${task.category}',
-        start: tz.TZDateTime.from(startDate, tz.local),
-        end: tz.TZDateTime.from(endDate, tz.local),
+        title: '[WeeklyPulse] ${task.title}',
+        description: 'Öncelik: ${task.priority}\nKategori: ${task.category}',
+        start: tz.TZDateTime.from(start, tz.local),
+        end: tz.TZDateTime.from(end, tz.local),
       );
 
-      final result = await _deviceCalendarPlugin.createOrUpdateEvent(event);
-      if (result != null && result.isSuccess && result.data != null) {
-        return result.data;
+      // Event dışarıdan silinmişse (recovery): update dene, olmazsa yeni event oluştur
+      if (task.calendarEventId != null && task.calendarEventId!.isNotEmpty) {
+        final updateResult =
+            await _deviceCalendarPlugin.createOrUpdateEvent(event);
+        if (updateResult?.isSuccess == true && updateResult?.data != null) {
+          return updateResult!.data;
+        }
       }
+
+      // Yeni etkinlik oluştur
+      event.eventId = null;
+      final createResult =
+          await _deviceCalendarPlugin.createOrUpdateEvent(event);
+      if (createResult?.isSuccess == true) {
+        return createResult?.data;
+      }
+      return null;
     } catch (e) {
-      debugPrint("Calendar Add Event Error: $e");
+      debugPrint("Calendar addOrUpdateEvent Hatası: $e");
+      return null;
     }
-    return null;
   }
 
   static Future<bool> deleteEvent(String calendarId, String eventId) async {
     try {
-      final result =
-          await _deviceCalendarPlugin.deleteEvent(calendarId, eventId);
-      return result.isSuccess && (result.data ?? false);
+      final hasPermission = await requestPermissions();
+      if (!hasPermission) return false;
+
+      final res = await _deviceCalendarPlugin.deleteEvent(calendarId, eventId);
+      // Etkinlik zaten yoksa da silinmiş kabul edilir
+      return res.isSuccess;
     } catch (e) {
-      debugPrint("Calendar Delete Event Error: $e");
+      debugPrint("Calendar deleteEvent Hatası: $e");
       return false;
     }
   }
