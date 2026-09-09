@@ -1,6 +1,6 @@
--- WeeklyPulse Canonical Production Migration v13 (Live Schema Upgrade & Outbox Delete Parity)
+-- WeeklyPulse Canonical Production Migration v14 (Delete RLS RPC & Full Nullability Parity)
 
--- 1. KISITLAMALAR VE PROFİL ŞEMASI
+-- 1. TABLO KISITLAMALARI VE PROFİL
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'check_weekly_tasks_mode') THEN
@@ -18,7 +18,7 @@ END $$;
 
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS last_usage_week text;
 
--- 2. P0: SYNC_OPERATIONS & ARCHIVE İÇİN AÇIK KOLON GÖÇÜ (EXPLICIT COMPATIBILITY)
+-- 2. SYNC_OPERATIONS & ARŞİV TABLOSU GÜVENCESİ (NOT NULL & BACKFILL)
 CREATE TABLE IF NOT EXISTS public.sync_operations_archive (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     original_operation_id uuid NOT NULL,
@@ -43,6 +43,11 @@ ALTER TABLE public.sync_operations_archive ADD COLUMN IF NOT EXISTS status text;
 ALTER TABLE public.sync_operations_archive ADD COLUMN IF NOT EXISTS attempts integer;
 ALTER TABLE public.sync_operations_archive ADD COLUMN IF NOT EXISTS archived_at timestamptz DEFAULT now();
 ALTER TABLE public.sync_operations_archive ADD COLUMN IF NOT EXISTS archive_reason text DEFAULT 'duplicate_resolution';
+
+-- Arşiv tablosu null backfill
+UPDATE public.sync_operations_archive SET operation_type = 'unknown' WHERE operation_type IS NULL;
+UPDATE public.sync_operations_archive SET original_operation_id = gen_random_uuid() WHERE original_operation_id IS NULL;
+UPDATE public.sync_operations_archive SET user_id = gen_random_uuid() WHERE user_id IS NULL;
 
 ALTER TABLE public.sync_operations_archive ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS "Users can only read own archived operations" ON public.sync_operations_archive;
@@ -80,7 +85,6 @@ ALTER TABLE public.sync_operations ADD COLUMN IF NOT EXISTS locked_until timesta
 ALTER TABLE public.sync_operations ADD COLUMN IF NOT EXISTS last_error text;
 ALTER TABLE public.sync_operations ADD COLUMN IF NOT EXISTS updated_at timestamptz DEFAULT now();
 
--- FK ON DELETE SET NULL
 ALTER TABLE public.sync_operations DROP CONSTRAINT IF EXISTS sync_operations_task_id_fkey;
 ALTER TABLE public.sync_operations 
 ADD CONSTRAINT sync_operations_task_id_fkey 
@@ -92,7 +96,7 @@ WHERE idempotency_key IS NULL OR trim(idempotency_key) = '';
 
 ALTER TABLE public.sync_operations ALTER COLUMN idempotency_key SET NOT NULL;
 
--- 3. P0: USER_QUOTA_LEDGER İÇİN AÇIK KOLON GÖÇÜ
+-- 3. USER_QUOTA_LEDGER KESİN NOT NULL & CONSTRAINT PARITY
 CREATE TABLE IF NOT EXISTS public.user_quota_ledger (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
@@ -109,6 +113,17 @@ ALTER TABLE public.user_quota_ledger ADD COLUMN IF NOT EXISTS period_key text DE
 ALTER TABLE public.user_quota_ledger ADD COLUMN IF NOT EXISTS request_id text;
 ALTER TABLE public.user_quota_ledger ADD COLUMN IF NOT EXISTS status text DEFAULT 'consumed';
 ALTER TABLE public.user_quota_ledger ADD COLUMN IF NOT EXISTS created_at timestamptz DEFAULT now();
+
+-- Null backfill ve NOT NULL zorunluluğu
+UPDATE public.user_quota_ledger SET quota_type = 'ai' WHERE quota_type IS NULL;
+UPDATE public.user_quota_ledger SET period_key = to_char(now(), 'IYYY-IW') WHERE period_key IS NULL;
+UPDATE public.user_quota_ledger SET request_id = 'legacy_req_' || id::text WHERE request_id IS NULL;
+UPDATE public.user_quota_ledger SET status = 'consumed' WHERE status IS NULL;
+
+ALTER TABLE public.user_quota_ledger ALTER COLUMN quota_type SET NOT NULL;
+ALTER TABLE public.user_quota_ledger ALTER COLUMN period_key SET NOT NULL;
+ALTER TABLE public.user_quota_ledger ALTER COLUMN request_id SET NOT NULL;
+ALTER TABLE public.user_quota_ledger ALTER COLUMN status SET NOT NULL;
 
 DO $$
 BEGIN
@@ -130,7 +145,46 @@ ON public.user_quota_ledger FOR SELECT
 TO authenticated
 USING (auth.uid() = user_id);
 
--- 4. P1: DELETE OPERATION İÇİN IMMUTABLE EXTERNAL REFS İLE OUTBOX RPC
+-- 4. P0 ÇÖZÜMÜ: DELETE STATUS COMPLETION RPC (Direct client update yerine server-authoritative RPC)
+CREATE OR REPLACE FUNCTION public.complete_delete_operation(
+    p_operation_id uuid
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+    v_user_id uuid;
+    v_op record;
+BEGIN
+    v_user_id := auth.uid();
+    IF v_user_id IS NULL THEN
+        RETURN jsonb_build_object('success', false, 'code', 'UNAUTHORIZED', 'message', 'Oturum bulunamadı.');
+    END IF;
+
+    SELECT * INTO v_op
+    FROM public.sync_operations
+    WHERE id = p_operation_id AND user_id = v_user_id
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('success', false, 'code', 'NOT_FOUND', 'message', 'İşlem bulunamadı.');
+    END IF;
+
+    IF v_op.status = 'completed' THEN
+        RETURN jsonb_build_object('success', true, 'message', 'İşlem zaten tamamlanmış.', 'idempotent_replay', true);
+    END IF;
+
+    UPDATE public.sync_operations
+    SET status = 'completed', updated_at = now()
+    WHERE id = p_operation_id AND user_id = v_user_id;
+
+    RETURN jsonb_build_object('success', true, 'message', 'Silme işlemi başarıyla tamamlandı.');
+END;
+$$;
+
+-- 5. P1 ÇÖZÜMÜ: İDEMPOTENT VE RETRY-SAFE delete_task_durable RPC
 CREATE OR REPLACE FUNCTION public.delete_task_durable(
     p_task_id uuid
 )
@@ -142,11 +196,21 @@ AS $$
 DECLARE
     v_user_id uuid;
     v_task record;
+    v_existing_op record;
     v_outbox_id uuid;
 BEGIN
     v_user_id := auth.uid();
     IF v_user_id IS NULL THEN
         RETURN jsonb_build_object('success', false, 'code', 'UNAUTHORIZED', 'message', 'Oturum bulunamadı.');
+    END IF;
+
+    -- İdempotensi Kontrolü: Daha önce silme kaydı oluşturulmuşsa idempotent başarı dön
+    SELECT * INTO v_existing_op
+    FROM public.sync_operations
+    WHERE user_id = v_user_id AND idempotency_key = 'delete_' || p_task_id::text;
+
+    IF FOUND THEN
+        RETURN jsonb_build_object('success', true, 'message', 'Görev silinmiş ve temizleme kuyruğunda.', 'idempotent_replay', true);
     END IF;
 
     SELECT * INTO v_task
@@ -158,7 +222,7 @@ BEGIN
         RETURN jsonb_build_object('success', false, 'code', 'NOT_FOUND', 'message', 'Görev bulunamadı.');
     END IF;
 
-    -- Dış temizlik kaydı: Task silinse bile notification_id ve calendar_id saklanır
+    -- Dış temizlik kaydı oluştur
     INSERT INTO public.sync_operations (
         task_id,
         user_id,
@@ -184,6 +248,10 @@ BEGIN
     SET desired_state = EXCLUDED.desired_state, updated_at = now()
     RETURNING id INTO v_outbox_id;
 
+    IF v_outbox_id IS NULL THEN
+        RAISE EXCEPTION 'Delete outbox kaydı oluşturulamadı.';
+    END IF;
+
     DELETE FROM public.weekly_tasks
     WHERE id = p_task_id AND user_id = v_user_id;
 
@@ -191,9 +259,7 @@ BEGIN
 END;
 $$;
 
--- 5. CANONICAL RPC FONKSİYONLARI
-
--- save_task_mutation
+-- 6. DİĞER CANONICAL RPC'LER
 CREATE OR REPLACE FUNCTION public.save_task_mutation(
     p_task_id uuid,
     p_title text,
@@ -323,7 +389,6 @@ BEGIN
 END;
 $$;
 
--- create_voice_task_with_quota
 CREATE OR REPLACE FUNCTION public.create_voice_task_with_quota(
     p_request_id text,
     p_title text,
@@ -498,7 +563,6 @@ BEGIN
 END;
 $$;
 
--- consume_ai_quota
 CREATE OR REPLACE FUNCTION public.consume_ai_quota(
     p_request_id text
 )
@@ -591,7 +655,6 @@ BEGIN
 END;
 $$;
 
--- refund_ai_quota
 CREATE OR REPLACE FUNCTION public.refund_ai_quota(
     p_request_id text
 )
@@ -656,7 +719,7 @@ BEGIN
 END;
 $$;
 
--- 6. EXPLICIT ROLE-BASED ALLOWLIST
+-- 7. ROLE-BASED ALLOWLIST (P0 Yetkilendirme)
 REVOKE ALL ON FUNCTION public.save_task_mutation(uuid, text, text, integer, text, text, text, integer, text, timestamptz, text, boolean, integer) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.save_task_mutation(uuid, text, text, integer, text, text, text, integer, text, timestamptz, text, boolean, integer) TO authenticated;
 
@@ -671,3 +734,6 @@ GRANT EXECUTE ON FUNCTION public.refund_ai_quota(text) TO authenticated;
 
 REVOKE ALL ON FUNCTION public.delete_task_durable(uuid) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.delete_task_durable(uuid) TO authenticated;
+
+REVOKE ALL ON FUNCTION public.complete_delete_operation(uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.complete_delete_operation(uuid) TO authenticated;

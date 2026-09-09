@@ -162,14 +162,14 @@ class TaskSyncCoordinator {
     );
   }
 
-  // P1-05 & P1-06: Hem haftalık görevleri hem de silinmiş görevlerin dış temizlik outbox kayıtlarını doğrudan işleme
+  // P0 ÇÖZÜMÜ: complete_delete_operation RPC çağrısı ile RLS UPDATE engelini aşma
   static Future<int> reconcilePendingAndFailedTasks() async {
     final user = supabase.auth.currentUser;
     if (user == null) return 0;
 
     int reconciledCount = 0;
 
-    // 1. Silinmiş görevlerin kalıcı dış temizlik kayıtlarını doğrudan outbox tablosundan claim et
+    // 1. Silinmiş görevlerin dış temizlik kayıtlarını işle ve RPC ile tamamlandı işaretle
     try {
       final deleteOps = await supabase
           .from('sync_operations')
@@ -197,18 +197,22 @@ class TaskSyncCoordinator {
             } catch (_) {}
           }
 
-          await supabase.from('sync_operations').update({
-            'status': 'completed',
-            'updated_at': DateTime.now().toUtc().toIso8601String()
-          }).eq('id', op['id']);
-          reconciledCount++;
+          // Direct table update yerine ownership kontrollü RPC çağrısı (P0)
+          try {
+            await supabase.rpc('complete_delete_operation', params: {
+              'p_operation_id': op['id'],
+            });
+            reconciledCount++;
+          } catch (rpcErr) {
+            debugPrint("Delete Operation Complete RPC Hatası: $rpcErr");
+          }
         }
       }
     } catch (e) {
       debugPrint("Durable Delete Outbox Worker Hatası: $e");
     }
 
-    // 2. Mevcut görevlerin bekleyen eşitlenmelerini tamamla
+    // 2. Mevcut görevlerin bekleyen senkronizasyonlarını tamamla
     try {
       final res = await supabase
           .from('weekly_tasks')

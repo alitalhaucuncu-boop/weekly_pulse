@@ -57,7 +57,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
   DateTime selectedCalendarDay = DateTime.now();
 
   bool _isLoadingTasks = true;
-  bool _isAIAnalyzing = false; // P1-08 Double-Submit Guard
+  bool _isAIAnalyzing = false;
   String? _taskFetchError;
   final Set<String> _movingTaskIds = <String>{};
 
@@ -702,9 +702,8 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
     );
   }
 
-  // P1-08: Double-Submit / Loading Guard Korumalı Analiz Akışı
   void _showAIAnalysisModal() async {
-    if (_isAIAnalyzing) return; // Mükerrer tıklamayı engelle
+    if (_isAIAnalyzing) return;
     setState(() => _isAIAnalyzing = true);
 
     final scaffoldMessenger = ScaffoldMessenger.of(context);
@@ -727,16 +726,13 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
 
       if (quotaRes is! Map || quotaRes['success'] != true) {
         final message = (quotaRes is Map) ? quotaRes['message'] : null;
-        if (!mounted) {
-          setState(() => _isAIAnalyzing = false);
-          return;
+        if (mounted) {
+          _showLimitExceededDialog(
+            title: 'Haftalık Akıllı Analiz Hakkın Doldu! 🤖',
+            message: message ??
+                'Ücretsiz sürümde haftada 1 kez Akıllı Analiz alabilirsin.',
+          );
         }
-        _showLimitExceededDialog(
-          title: 'Haftalık Akıllı Analiz Hakkın Doldu! 🤖',
-          message: message ??
-              'Ücretsiz sürümde haftada 1 kez Akıllı Analiz alabilirsin.',
-        );
-        setState(() => _isAIAnalyzing = false);
         return;
       }
       if (mounted) {
@@ -745,233 +741,231 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
           isUserPremium = quotaRes['is_premium'] ?? isUserPremium;
         });
       }
-    } catch (e) {
-      debugPrint("AI Quota RPC Error: $e");
-      if (!isUserPremium) {
+
+      Map<String, dynamic> report;
+      try {
+        report =
+            PlanningEngine.generateWeeklyIntelligenceReport(allFetchedTasks);
+      } catch (engineError) {
+        debugPrint("Rapor Üretim Hatası, kota iade ediliyor: $engineError");
+        if (!isUserPremium) {
+          try {
+            final dynamic refundRes = await supabase.rpc(
+              'refund_ai_quota',
+              params: {'p_request_id': requestId},
+            );
+            if (refundRes is Map && refundRes['success'] == true && mounted) {
+              setState(() {
+                aiUsage =
+                    refundRes['ai_usage'] ?? ((aiUsage > 0) ? aiUsage - 1 : 0);
+              });
+            }
+          } catch (_) {}
+        }
         if (mounted) {
           scaffoldMessenger.showSnackBar(
-            const SnackBar(content: Text('Kota doğrulanamadı.')),
+            const SnackBar(
+                content: Text('Rapor oluşturulamadı, hakkınız iade edildi.')),
           );
         }
-        setState(() => _isAIAnalyzing = false);
         return;
       }
-    }
 
-    Map<String, dynamic> report;
-    try {
-      report = PlanningEngine.generateWeeklyIntelligenceReport(allFetchedTasks);
-    } catch (engineError) {
-      debugPrint("Rapor Üretim Hatası, kota iade ediliyor: $engineError");
-      if (!isUserPremium) {
-        try {
-          final dynamic refundRes = await supabase.rpc(
-            'refund_ai_quota',
-            params: {'p_request_id': requestId},
-          );
-          if (refundRes is Map && refundRes['success'] == true && mounted) {
-            setState(() {
-              aiUsage =
-                  refundRes['ai_usage'] ?? ((aiUsage > 0) ? aiUsage - 1 : 0);
-            });
-          }
-        } catch (_) {}
-      }
-      if (mounted) {
-        scaffoldMessenger.showSnackBar(
-          const SnackBar(
-              content: Text('Rapor oluşturulamadı, hakkınız iade edildi.')),
-        );
-      }
-      setState(() => _isAIAnalyzing = false);
-      return;
-    }
+      if (!mounted) return;
 
-    setState(() => _isAIAnalyzing = false);
-
-    if (!mounted) {
-      return;
-    }
-
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
-      builder: (modalContext) {
-        return Container(
-          padding: const EdgeInsets.all(24.0),
-          constraints: BoxConstraints(
-            maxHeight: MediaQuery.of(context).size.height * 0.85,
-          ),
-          child: SingleChildScrollView(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    const Icon(Icons.auto_awesome,
-                        color: Colors.amber, size: 30),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Text(
-                        isUserPremium
-                            ? '👑 Weekly Intelligence VIP Raporu'
-                            : '🤖 WeeklyPulse Bütünsel Yük Analizi',
-                        style: const TextStyle(
-                            fontSize: 17, fontWeight: FontWeight.bold),
+      showModalBottomSheet(
+        context: context,
+        isScrollControlled: true,
+        shape: const RoundedRectangleBorder(
+            borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+        builder: (modalContext) {
+          return Container(
+            padding: const EdgeInsets.all(24.0),
+            constraints: BoxConstraints(
+              maxHeight: MediaQuery.of(context).size.height * 0.85,
+            ),
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      const Icon(Icons.auto_awesome,
+                          color: Colors.amber, size: 30),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          isUserPremium
+                              ? '👑 Weekly Intelligence VIP Raporu'
+                              : '🤖 WeeklyPulse Bütünsel Yük Analizi',
+                          style: const TextStyle(
+                              fontSize: 17, fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 18),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Container(
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color:
+                                const Color(0xFF4A55A2).withValues(alpha: 0.12),
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text('🎓 Akademik / Ders',
+                                  style: TextStyle(
+                                      fontSize: 11, color: Colors.grey)),
+                              const SizedBox(height: 4),
+                              Text(
+                                  '${report['student']} Plan (${report['studentHours']} sa)',
+                                  style: const TextStyle(
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.bold,
+                                      color: Color(0xFF4A55A2))),
+                            ],
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Container(
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color:
+                                const Color(0xFF1E293B).withValues(alpha: 0.12),
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text('💼 Profesyonel / İş',
+                                  style: TextStyle(
+                                      fontSize: 11, color: Colors.grey)),
+                              const SizedBox(height: 4),
+                              Text(
+                                  '${report['pro']} Görev (${report['proHours']} sa)',
+                                  style: const TextStyle(
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.bold,
+                                      color: Color(0xFF1E293B))),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  if ((report['clashes'] as List).isNotEmpty) ...[
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Colors.redAccent.withValues(alpha: 0.1),
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(
+                            color: Colors.redAccent.withValues(alpha: 0.4)),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Row(
+                            children: [
+                              Icon(Icons.warning_amber_rounded,
+                                  color: Colors.redAccent, size: 18),
+                              SizedBox(width: 6),
+                              Text('Haftalık Gerçek Zaman Çakışmaları:',
+                                  style: TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 12,
+                                      color: Colors.redAccent)),
+                            ],
+                          ),
+                          const SizedBox(height: 6),
+                          ...(report['clashes'] as List<String>)
+                              .map((c) => Padding(
+                                    padding: const EdgeInsets.only(bottom: 4.0),
+                                    child: Text("• $c",
+                                        style: const TextStyle(fontSize: 11)),
+                                  )),
+                        ],
                       ),
                     ),
+                    const SizedBox(height: 14),
                   ],
-                ),
-                const SizedBox(height: 18),
-                Row(
-                  children: [
-                    Expanded(
-                      child: Container(
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color:
-                              const Color(0xFF4A55A2).withValues(alpha: 0.12),
-                          borderRadius: BorderRadius.circular(14),
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text('🎓 Akademik / Ders',
-                                style: TextStyle(
-                                    fontSize: 11, color: Colors.grey)),
-                            const SizedBox(height: 4),
-                            Text(
-                                '${report['student']} Plan (${report['studentHours']} sa)',
-                                style: const TextStyle(
-                                    fontSize: 14,
-                                    fontWeight: FontWeight.bold,
-                                    color: Color(0xFF4A55A2))),
-                          ],
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Container(
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color:
-                              const Color(0xFF1E293B).withValues(alpha: 0.12),
-                          borderRadius: BorderRadius.circular(14),
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text('💼 Profesyonel / İş',
-                                style: TextStyle(
-                                    fontSize: 11, color: Colors.grey)),
-                            const SizedBox(height: 4),
-                            Text(
-                                '${report['pro']} Görev (${report['proHours']} sa)',
-                                style: const TextStyle(
-                                    fontSize: 14,
-                                    fontWeight: FontWeight.bold,
-                                    color: Color(0xFF1E293B))),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 16),
-                if ((report['clashes'] as List).isNotEmpty) ...[
                   Container(
                     width: double.infinity,
-                    padding: const EdgeInsets.all(12),
+                    padding: const EdgeInsets.all(14),
                     decoration: BoxDecoration(
-                      color: Colors.redAccent.withValues(alpha: 0.1),
-                      borderRadius: BorderRadius.circular(14),
+                      color: widget.isDark
+                          ? Colors.grey.shade900
+                          : Colors.grey.shade100,
+                      borderRadius: BorderRadius.circular(16),
                       border: Border.all(
-                          color: Colors.redAccent.withValues(alpha: 0.4)),
+                          color:
+                              const Color(0xFF7895CB).withValues(alpha: 0.3)),
                     ),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         const Row(
                           children: [
-                            Icon(Icons.warning_amber_rounded,
-                                color: Colors.redAccent, size: 18),
+                            Icon(Icons.insights,
+                                size: 18, color: Color(0xFF7895CB)),
                             SizedBox(width: 6),
-                            Text('Haftalık Gerçek Zaman Çakışmaları:',
+                            Text('Haftalık Zeka Analiz Tavsiyeleri:',
                                 style: TextStyle(
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 12,
-                                    color: Colors.redAccent)),
+                                    fontWeight: FontWeight.bold, fontSize: 13)),
                           ],
                         ),
-                        const SizedBox(height: 6),
-                        ...(report['clashes'] as List<String>)
-                            .map((c) => Padding(
-                                  padding: const EdgeInsets.only(bottom: 4.0),
-                                  child: Text("• $c",
-                                      style: const TextStyle(fontSize: 11)),
+                        const SizedBox(height: 8),
+                        ...(report['recommendations'] as List<String>)
+                            .map((rec) => Padding(
+                                  padding: const EdgeInsets.only(bottom: 6.0),
+                                  child: Text(rec,
+                                      style: const TextStyle(
+                                          fontSize: 12, height: 1.3)),
                                 )),
                       ],
                     ),
                   ),
-                  const SizedBox(height: 14),
+                  const SizedBox(height: 20),
+                  SizedBox(
+                    width: double.infinity,
+                    height: 48,
+                    child: ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF7895CB)),
+                      onPressed: () => Navigator.pop(modalContext),
+                      child: const Text('Anladım, Harika! 👍',
+                          style: TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.bold)),
+                    ),
+                  )
                 ],
-                Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(14),
-                  decoration: BoxDecoration(
-                    color: widget.isDark
-                        ? Colors.grey.shade900
-                        : Colors.grey.shade100,
-                    borderRadius: BorderRadius.circular(16),
-                    border: Border.all(
-                        color: const Color(0xFF7895CB).withValues(alpha: 0.3)),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Row(
-                        children: [
-                          Icon(Icons.insights,
-                              size: 18, color: Color(0xFF7895CB)),
-                          SizedBox(width: 6),
-                          Text('Haftalık Zeka Analiz Tavsiyeleri:',
-                              style: TextStyle(
-                                  fontWeight: FontWeight.bold, fontSize: 13)),
-                        ],
-                      ),
-                      const SizedBox(height: 8),
-                      ...(report['recommendations'] as List<String>)
-                          .map((rec) => Padding(
-                                padding: const EdgeInsets.only(bottom: 6.0),
-                                child: Text(rec,
-                                    style: const TextStyle(
-                                        fontSize: 12, height: 1.3)),
-                              )),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 20),
-                SizedBox(
-                  width: double.infinity,
-                  height: 48,
-                  child: ElevatedButton(
-                    style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFF7895CB)),
-                    onPressed: () => Navigator.pop(modalContext),
-                    child: const Text('Anladım, Harika! 👍',
-                        style: TextStyle(
-                            color: Colors.white, fontWeight: FontWeight.bold)),
-                  ),
-                )
-              ],
+              ),
             ),
-          ),
+          );
+        },
+      );
+    } catch (e) {
+      debugPrint("Genel AI Analiz Hatası: $e");
+      if (mounted) {
+        scaffoldMessenger.showSnackBar(
+          SnackBar(content: Text('Hata: $e')),
         );
-      },
-    );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isAIAnalyzing = false);
+      }
+    }
   }
 
   void _showLimitExceededDialog(
@@ -2850,7 +2844,8 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                   child: Padding(
                     padding: const EdgeInsets.all(24.0),
                     child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
+                      mainAxisAlignment: Center(child: Text(_taskFetchError!))
+                          .mainAxisAlignment,
                       children: [
                         const Icon(Icons.wifi_off,
                             size: 48, color: Colors.grey),
