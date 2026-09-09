@@ -158,7 +158,7 @@ class TaskSyncCoordinator {
     );
   }
 
-  // P1: Atomic Claim & Trust-Boundary Verification Reconcile
+  // P0/P1: Lease Token Doğrulamalı ve Whitelist Güvenlikli Reconcile
   static Future<int> reconcilePendingAndFailedTasks() async {
     final user = supabase.auth.currentUser;
     if (user == null) return 0;
@@ -166,7 +166,7 @@ class TaskSyncCoordinator {
     int reconciledCount = 0;
 
     try {
-      // 1. İşlemleri lease ile atomik olarak claim et (P1)
+      // 1. İşlemleri lease_token ile atomik olarak claim et (P0/P1)
       final dynamic claimResult = await supabase.rpc(
         'claim_pending_delete_operations',
         params: {'p_limit': 10, 'p_lease_seconds': 60},
@@ -176,17 +176,20 @@ class TaskSyncCoordinator {
 
       for (var op in deleteOps) {
         final desired = op['desired_state'] as Map<String, dynamic>?;
-        if (desired != null) {
+        final String? leaseToken = op['lease_token'] as String?;
+
+        if (desired != null && leaseToken != null && leaseToken.isNotEmpty) {
           final notifId = desired['notification_id'] as int?;
           final calId = desired['calendar_id'] as String?;
           final eventId = desired['calendar_event_id'] as String?;
 
-          String notifStatus = 'skipped';
-          String calStatus = 'skipped';
+          String notifStatus = (notifId == null) ? 'skipped' : 'failed';
+          String calStatus =
+              (eventId == null || eventId.isEmpty) ? 'skipped' : 'failed';
           String? verifiedEventId;
           String? errorMessage;
 
-          // Bildirim temizliği
+          // Bildirim temizliği (Whitelist: 'client_acknowledged' | 'failed' | 'skipped')
           if (notifId != null) {
             try {
               await NotificationService.cancelNotification(notifId);
@@ -197,8 +200,8 @@ class TaskSyncCoordinator {
             }
           }
 
-          // Takvim temizliği ve teyidi
-          if (calId != null && eventId != null) {
+          // Takvim temizliği (Whitelist: 'provider_verified' | 'provider_not_found' | 'failed' | 'skipped')
+          if (calId != null && eventId != null && eventId.isNotEmpty) {
             try {
               final ok = await CalendarService.deleteEvent(calId, eventId);
               if (ok) {
@@ -218,11 +221,12 @@ class TaskSyncCoordinator {
             }
           }
 
-          // 2. Doğrulanmış side effect raporu gönder (P0)
+          // 2. Lease token ve doğrulanmış side-effect ile RPC'yi raporla (P0)
           try {
             final res =
                 await supabase.rpc('report_delete_side_effects', params: {
               'p_operation_id': op['id'],
+              'p_lease_token': leaseToken,
               'p_notification_status': notifStatus,
               'p_calendar_status': calStatus,
               'p_verified_event_id': verifiedEventId,

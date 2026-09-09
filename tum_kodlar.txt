@@ -1155,17 +1155,97 @@ class TaskCard extends StatelessWidget {
 
 
 import 'package:flutter/material.dart';
+
+class LegalModal {
+  static void showPrivacyPolicy(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (ctx) {
+        return Container(
+          padding: const EdgeInsets.all(24),
+          height: MediaQuery.of(ctx).size.height * 0.8,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  const Text(
+                    'Gizlilik Politikası & KVKK',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.close),
+                    onPressed: () => Navigator.pop(ctx),
+                  ),
+                ],
+              ),
+              const Divider(),
+              const Expanded(
+                child: SingleChildScrollView(
+                  child: Text(
+                    '''WeeklyPulse olarak kişisel verilerinizin güvenliğine büyük önem veriyoruz.
+
+1. Toplanan Veriler:
+• Hesap Bilgileri: Kayıt esnasında sağlanan e-posta adresi ve şifrelenmiş kimlik bilgileri.
+• Görev ve Planlama Verileri: Eklediğiniz görevler, teslim tarihleri, süreler, öncelikler ve tamamlanma durumları.
+• Takvim ve Bildirim Bilgileri: Cihazınızda yerel olarak kurulan bildirim ID'leri ve tercih ettiğiniz takvim etkinlik referansları.
+
+2. Verilerin İşlenme Amacı:
+Verileriniz yalnızca planlarınızı cihazlar arasında senkronize etmek, zamanında hatırlatıcı bildirimler iletmek ve haftalık iş yükü analizinizi gerçekleştirmek amacıyla işlenir.
+
+3. Üçüncü Taraflarla Paylaşım:
+Kişisel verileriniz, görevleriniz veya takvim etkinlikleriniz asla reklam şirketleri veya üçüncü taraf veri sağlayıcıları ile satılmaz veya paylaşılmaz.
+
+4. Veri Saklama ve Hesap Silme:
+Kullanıcılar diledikleri zaman Profil menüsü altından "Hesabımı Kalıcı Olarak Sil" seçeneğini kullanarak tüm görevlerini, kotalarını ve hesap geçmişlerini veritabanından kalıcı ve geri alınamaz şekilde silebilirler.
+
+İletişim: support@weeklypulse.app''',
+                    style: TextStyle(
+                        fontSize: 13, height: 1.5, color: Colors.blueGrey),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              SizedBox(
+                width: double.infinity,
+                height: 46,
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF7895CB)),
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('Kapat',
+                      style: TextStyle(
+                          color: Colors.white, fontWeight: FontWeight.bold)),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+
+
+import 'package:flutter/material.dart';
 import '../../core/constants.dart';
+import '../widgets/legal_modal.dart';
 import 'weekly_planner_screen.dart';
 
 class AuthScreen extends StatefulWidget {
-  final VoidCallback onThemeToggle;
   final bool isDark;
+  final VoidCallback onThemeToggle;
 
   const AuthScreen({
     super.key,
-    required this.onThemeToggle,
     required this.isDark,
+    required this.onThemeToggle,
   });
 
   @override
@@ -1173,11 +1253,11 @@ class AuthScreen extends StatefulWidget {
 }
 
 class _AuthScreenState extends State<AuthScreen> {
-  bool isLogin = true;
-  final TextEditingController _emailController = TextEditingController();
-  final TextEditingController _passwordController = TextEditingController();
-  DateTime? _selectedBirthDate;
+  final _emailController = TextEditingController();
+  final _passwordController = TextEditingController();
+  bool _isSignUp = false;
   bool _isLoading = false;
+  String? _errorMessage;
 
   @override
   void dispose() {
@@ -1191,77 +1271,62 @@ class _AuthScreenState extends State<AuthScreen> {
     final password = _passwordController.text.trim();
 
     if (email.isEmpty || password.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Lütfen tüm alanları doldurun.')),
-      );
+      setState(() => _errorMessage = 'Lütfen e-posta ve şifrenizi girin.');
       return;
     }
 
-    if (!isLogin && _selectedBirthDate == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Lütfen doğum tarihinizi seçin.')),
-      );
+    if (password.length < 6) {
+      setState(() => _errorMessage = 'Şifre en az 6 karakter olmalıdır.');
       return;
     }
 
-    setState(() => _isLoading = true);
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
 
     try {
-      if (isLogin) {
-        final res = await supabase.auth
-            .signInWithPassword(email: email, password: password);
-        if (res.session != null && mounted) {
-          Navigator.of(context).pushReplacement(
-            MaterialPageRoute(
-              builder: (_) => WeeklyPlannerScreen(
-                onThemeToggle: widget.onThemeToggle,
-                isDark: widget.isDark,
-              ),
-            ),
-          );
+      if (_isSignUp) {
+        final res = await supabase.auth.signUp(
+          email: email,
+          password: password,
+        );
+        if (res.user == null) {
+          throw Exception('Kayıt oluşturulamadı.');
         }
       } else {
-        final res =
-            await supabase.auth.signUp(email: email, password: password);
-
-        if (res.session != null && _selectedBirthDate != null) {
-          try {
-            await supabase.rpc('complete_user_profile', params: {
-              'p_birth_date': _selectedBirthDate!.toIso8601String(),
-            });
-          } catch (e) {
-            debugPrint("Profil Tamamlama Hatası: $e");
-          }
-
-          if (mounted) {
-            Navigator.of(context).pushReplacement(
-              MaterialPageRoute(
-                builder: (_) => WeeklyPlannerScreen(
-                  onThemeToggle: widget.onThemeToggle,
-                  isDark: widget.isDark,
-                ),
-              ),
-            );
-          }
-        } else if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text(
-                  'Kayıt başarılı! Lütfen e-posta adresinize gelen doğrulama bağlantısına tıklayın.'),
-              backgroundColor: Colors.green,
-              duration: Duration(seconds: 5),
-            ),
-          );
-          setState(() => isLogin = true);
+        final res = await supabase.auth.signInWithPassword(
+          email: email,
+          password: password,
+        );
+        if (res.user == null) {
+          throw Exception('Giriş başarısız.');
         }
       }
-    } catch (e) {
+
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-              content: Text(
-                  'İşlem sırasında bir hata oluştu. Lütfen bilgilerinizi kontrol edin.')),
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (_) => WeeklyPlannerScreen(
+              isDark: widget.isDark,
+              onThemeToggle: widget.onThemeToggle,
+            ),
+          ),
         );
+      }
+    } catch (e) {
+      String msg = 'Giriş yapılamadı. Bilgilerinizi kontrol edin.';
+      final errStr = e.toString().toLowerCase();
+      if (errStr.contains('user already registered')) {
+        msg = 'Bu e-posta ile zaten bir hesap var. Giriş yapmayı deneyin.';
+      } else if (errStr.contains('invalid login credentials')) {
+        msg = 'E-posta veya şifre hatalı.';
+      } else if (errStr.contains('network') || errStr.contains('socket')) {
+        msg = 'İnternet bağlantınızı kontrol edin.';
+      }
+      if (mounted) {
+        setState(() => _errorMessage = msg);
       }
     } finally {
       if (mounted) {
@@ -1270,11 +1335,114 @@ class _AuthScreenState extends State<AuthScreen> {
     }
   }
 
+  void _showForgotPasswordDialog() {
+    final resetEmailController =
+        TextEditingController(text: _emailController.text.trim());
+    bool isSending = false;
+    String? dialogError;
+
+    showDialog(
+      context: context,
+      builder: (dialogCtx) {
+        return StatefulBuilder(
+          builder: (ctx, setDialogState) {
+            return AlertDialog(
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(20)),
+              title: const Text('Şifremi Unuttum 🔑',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Şifre sıfırlama bağlantısı almak için hesabınıza kayıtlı e-posta adresinizi yazın.',
+                    style: TextStyle(fontSize: 13, color: Colors.grey),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: resetEmailController,
+                    keyboardType: TextInputType.emailAddress,
+                    decoration: const InputDecoration(
+                      labelText: 'E-Posta Adresi',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  if (dialogError != null) ...[
+                    const SizedBox(height: 8),
+                    Text(dialogError!,
+                        style: const TextStyle(
+                            color: Colors.redAccent, fontSize: 12)),
+                  ],
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(dialogCtx),
+                  child: const Text('Vazgeç'),
+                ),
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF4A55A2)),
+                  onPressed: isSending
+                      ? null
+                      : () async {
+                          final email = resetEmailController.text.trim();
+                          if (email.isEmpty || !email.contains('@')) {
+                            setDialogState(() => dialogError =
+                                'Geçerli bir e-posta adresi girin.');
+                            return;
+                          }
+
+                          setDialogState(() {
+                            isSending = true;
+                            dialogError = null;
+                          });
+
+                          try {
+                            await supabase.auth.resetPasswordForEmail(email);
+                            if (!dialogCtx.mounted) return;
+                            Navigator.pop(dialogCtx);
+                            if (mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text(
+                                      'Şifre sıfırlama e-postası gönderildi. Kutunuzu kontrol edin.'),
+                                  backgroundColor: Colors.green,
+                                ),
+                              );
+                            }
+                          } catch (e) {
+                            setDialogState(() {
+                              isSending = false;
+                              dialogError = 'E-posta gönderilemedi: $e';
+                            });
+                          }
+                        },
+                  child: isSending
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(
+                              color: Colors.white, strokeWidth: 2),
+                        )
+                      : const Text('Gönder',
+                          style: TextStyle(color: Colors.white)),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    const primaryColor = Color(0xFF4A55A2);
+
     return Scaffold(
       appBar: AppBar(
-        title: Text(isLogin ? 'Giriş Yap' : 'Kayıt Ol'),
         actions: [
           IconButton(
             icon: Icon(
@@ -1285,79 +1453,134 @@ class _AuthScreenState extends State<AuthScreen> {
       ),
       body: Center(
         child: SingleChildScrollView(
-          padding: const EdgeInsets.all(24.0),
+          padding: const EdgeInsets.all(28.0),
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              const Icon(Icons.calendar_month,
-                  size: 72, color: Color(0xFF7895CB)),
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: primaryColor.withValues(alpha: 0.12),
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(Icons.calendar_month_rounded,
+                    size: 48, color: primaryColor),
+              ),
               const SizedBox(height: 16),
               const Text(
                 'WeeklyPulse',
                 style: TextStyle(fontSize: 26, fontWeight: FontWeight.bold),
               ),
-              const SizedBox(height: 24),
+              const SizedBox(height: 4),
+              const Text(
+                'Hayat planını bozar, WeeklyPulse toparlar.',
+                style: TextStyle(fontSize: 13, color: Colors.grey),
+              ),
+              const SizedBox(height: 28),
+              if (_errorMessage != null) ...[
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.redAccent.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(
+                        color: Colors.redAccent.withValues(alpha: 0.4)),
+                  ),
+                  child: Text(
+                    _errorMessage!,
+                    style: const TextStyle(
+                        color: Colors.redAccent,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600),
+                  ),
+                ),
+                const SizedBox(height: 16),
+              ],
               TextField(
                 controller: _emailController,
                 keyboardType: TextInputType.emailAddress,
-                decoration: const InputDecoration(
-                  labelText: 'E-posta',
-                  border: OutlineInputBorder(),
+                decoration: InputDecoration(
+                  labelText: 'E-Posta',
+                  prefixIcon: const Icon(Icons.email_outlined),
+                  border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(14)),
                 ),
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: 14),
               TextField(
                 controller: _passwordController,
                 obscureText: true,
-                decoration: const InputDecoration(
+                decoration: InputDecoration(
                   labelText: 'Şifre',
-                  border: OutlineInputBorder(),
+                  prefixIcon: const Icon(Icons.lock_outline),
+                  border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(14)),
                 ),
               ),
-              if (!isLogin) ...[
-                const SizedBox(height: 12),
-                OutlinedButton.icon(
-                  icon: const Icon(Icons.cake_outlined),
-                  label: Text(
-                    _selectedBirthDate == null
-                        ? 'Doğum Tarihi Seç'
-                        : 'Doğum Tarihi: ${_selectedBirthDate!.day}/${_selectedBirthDate!.month}/${_selectedBirthDate!.year}',
+              if (!_isSignUp) ...[
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton(
+                    onPressed: _showForgotPasswordDialog,
+                    child: const Text('Şifremi Unuttum',
+                        style: TextStyle(fontSize: 12, color: primaryColor)),
                   ),
-                  onPressed: () async {
-                    final picked = await showDatePicker(
-                      context: context,
-                      initialDate: DateTime(2000),
-                      firstDate: DateTime(1940),
-                      lastDate: DateTime.now(),
-                    );
-                    if (picked != null) {
-                      setState(() => _selectedBirthDate = picked);
-                    }
-                  },
                 ),
-              ],
-              const SizedBox(height: 20),
+              ] else
+                const SizedBox(height: 14),
               SizedBox(
                 width: double.infinity,
-                height: 48,
+                height: 50,
                 child: ElevatedButton(
                   style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFF7895CB)),
+                    backgroundColor: primaryColor,
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(14)),
+                  ),
                   onPressed: _isLoading ? null : _submit,
                   child: _isLoading
-                      ? const CircularProgressIndicator(color: Colors.white)
-                      : Text(isLogin ? 'Giriş Yap' : 'Kayıt Ol',
+                      ? const SizedBox(
+                          width: 22,
+                          height: 22,
+                          child: CircularProgressIndicator(
+                              color: Colors.white, strokeWidth: 2),
+                        )
+                      : Text(
+                          _isSignUp ? 'Hesap Oluştur' : 'Giriş Yap',
                           style: const TextStyle(
                               color: Colors.white,
-                              fontWeight: FontWeight.bold)),
+                              fontWeight: FontWeight.bold,
+                              fontSize: 15),
+                        ),
                 ),
               ),
               const SizedBox(height: 12),
               TextButton(
-                onPressed: () => setState(() => isLogin = !isLogin),
-                child: Text(isLogin
-                    ? 'Hesabın yok mu? Kayıt Ol'
-                    : 'Zaten hesabın var mı? Giriş Yap'),
+                onPressed: () {
+                  setState(() {
+                    _isSignUp = !_isSignUp;
+                    _errorMessage = null;
+                  });
+                },
+                child: Text(
+                  _isSignUp
+                      ? 'Zaten hesabınız var mı? Giriş yapın'
+                      : 'Hesabınız yok mu? Hemen kaydolun',
+                  style: const TextStyle(fontSize: 13, color: Colors.blueGrey),
+                ),
+              ),
+              const SizedBox(height: 16),
+              GestureDetector(
+                onTap: () => LegalModal.showPrivacyPolicy(context),
+                child: const Text(
+                  'Kullanım Şartları ve Gizlilik Politikası (KVKK)',
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: Colors.grey,
+                    decoration: TextDecoration.underline,
+                  ),
+                ),
               ),
             ],
           ),
@@ -1991,10 +2214,106 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                       },
                     ),
                   ),
+                  const SizedBox(height: 8),
+                  SizedBox(
+                    width: double.infinity,
+                    height: 44,
+                    child: TextButton.icon(
+                      style: TextButton.styleFrom(
+                          foregroundColor: Colors.redAccent),
+                      icon: const Icon(Icons.delete_forever, size: 20),
+                      label: const Text('Hesabımı Kalıcı Olarak Sil',
+                          style: TextStyle(
+                              fontSize: 12, fontWeight: FontWeight.w600)),
+                      onPressed: () {
+                        Navigator.pop(modalContext);
+                        _confirmDeleteAccount();
+                      },
+                    ),
+                  ),
                 ],
               ),
             );
           },
+        );
+      },
+    );
+  }
+
+  void _confirmDeleteAccount() {
+    showDialog(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          title: const Text('Hesabı Kalıcı Olarak Sil 🚨',
+              style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 18,
+                  color: Colors.redAccent)),
+          content: const Text(
+            'Hesabınızı ve kaydedilen tüm haftalık planlarınızı, bildirimlerinizi kalıcı olarak silmek istediğinize emin misiniz? Bu işlem geri alınamaz.',
+            style: TextStyle(fontSize: 13, color: Colors.grey),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Vazgeç'),
+            ),
+            ElevatedButton(
+              style:
+                  ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
+              onPressed: () async {
+                final scaffoldMessenger = ScaffoldMessenger.of(context);
+                final navigator = Navigator.of(context);
+                try {
+                  final res = await supabase.rpc('delete_user_account');
+                  final bool ok = res is Map && res['success'] == true;
+
+                  if (ok) {
+                    await supabase.auth.signOut();
+                    if (!mounted) return;
+                    Navigator.pop(dialogContext);
+                    navigator.pushReplacement(
+                      MaterialPageRoute(
+                        builder: (_) => AuthScreen(
+                          onThemeToggle: widget.onThemeToggle,
+                          isDark: widget.isDark,
+                        ),
+                      ),
+                    );
+                    scaffoldMessenger.showSnackBar(
+                      const SnackBar(
+                          content: Text(
+                              'Hesabınız ve tüm verileriniz başarıyla silindi.')),
+                    );
+                  } else {
+                    if (mounted) {
+                      Navigator.pop(dialogContext);
+                      scaffoldMessenger.showSnackBar(
+                        SnackBar(
+                            content: Text((res is Map)
+                                ? (res['message'] ?? 'Silme başarısız.')
+                                : 'Silme başarısız.')),
+                      );
+                    }
+                  }
+                } catch (e) {
+                  debugPrint("Hesap Silme Hatası: $e");
+                  if (mounted) {
+                    Navigator.pop(dialogContext);
+                    scaffoldMessenger.showSnackBar(
+                      SnackBar(content: Text('Hata oluştu: $e')),
+                    );
+                  }
+                }
+              },
+              child: const Text('Evet, Kalıcı Olarak Sil',
+                  style: TextStyle(
+                      color: Colors.white, fontWeight: FontWeight.bold)),
+            ),
+          ],
         );
       },
     );
@@ -2498,42 +2817,44 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
     String lower = speechText.toLowerCase();
 
     DateTime now = DateTime.now();
-    int detectedDayIndex = (selectedDayIndex < 0 || selectedDayIndex >= 7)
-        ? (now.weekday - 1)
-        : selectedDayIndex;
+    DateTime todayMidnight = DateTime(now.year, now.month, now.day);
+    DateTime targetDate = todayMidnight;
 
-    DateTime targetDate = now;
-
-    if (RegExp(r'\bcumartesi\b').hasMatch(lower)) {
-      detectedDayIndex = 5;
-      targetDate = currentWeekMonday.add(const Duration(days: 5));
-    } else if (RegExp(r'\bpazartesi\b').hasMatch(lower)) {
-      detectedDayIndex = 0;
-      targetDate = currentWeekMonday.add(const Duration(days: 0));
-    } else if (RegExp(r'\bçarşamba\b').hasMatch(lower)) {
-      detectedDayIndex = 2;
-      targetDate = currentWeekMonday.add(const Duration(days: 2));
-    } else if (RegExp(r'\bperşembe\b').hasMatch(lower)) {
-      detectedDayIndex = 3;
-      targetDate = currentWeekMonday.add(const Duration(days: 3));
-    } else if (RegExp(r'\bcuma\b').hasMatch(lower)) {
-      detectedDayIndex = 4;
-      targetDate = currentWeekMonday.add(const Duration(days: 4));
+    int targetWeekday = -1;
+    if (RegExp(r'\bpazartesi\b').hasMatch(lower)) {
+      targetWeekday = DateTime.monday;
     } else if (RegExp(r'\bsalı\b').hasMatch(lower)) {
-      detectedDayIndex = 1;
-      targetDate = currentWeekMonday.add(const Duration(days: 1));
+      targetWeekday = DateTime.tuesday;
+    } else if (RegExp(r'\bçarşamba\b').hasMatch(lower)) {
+      targetWeekday = DateTime.wednesday;
+    } else if (RegExp(r'\bperşembe\b').hasMatch(lower)) {
+      targetWeekday = DateTime.thursday;
+    } else if (RegExp(r'\bcuma\b').hasMatch(lower)) {
+      targetWeekday = DateTime.friday;
+    } else if (RegExp(r'\bcumartesi\b').hasMatch(lower)) {
+      targetWeekday = DateTime.saturday;
     } else if (RegExp(r'\bpazar\b').hasMatch(lower)) {
-      detectedDayIndex = 6;
-      targetDate = currentWeekMonday.add(const Duration(days: 6));
-    } else if (RegExp(r'\byarın\b').hasMatch(lower)) {
-      targetDate = now.add(const Duration(days: 1));
-      detectedDayIndex = targetDate.weekday - 1;
-    } else if (RegExp(r'\bbugün\b').hasMatch(lower)) {
-      targetDate = now;
-      detectedDayIndex = now.weekday - 1;
-    } else {
-      targetDate = currentWeekMonday.add(Duration(days: detectedDayIndex));
+      targetWeekday = DateTime.sunday;
     }
+
+    if (targetWeekday != -1) {
+      int diff = targetWeekday - todayMidnight.weekday;
+      if (diff <= 0) {
+        diff += 7;
+      }
+      targetDate = todayMidnight.add(Duration(days: diff));
+    } else if (RegExp(r'\byarın\b').hasMatch(lower)) {
+      targetDate = todayMidnight.add(const Duration(days: 1));
+    } else if (RegExp(r'\bbugün\b').hasMatch(lower)) {
+      targetDate = todayMidnight;
+    } else {
+      int safeIndex = (selectedDayIndex < 0 || selectedDayIndex >= 7)
+          ? (now.weekday - 1)
+          : selectedDayIndex;
+      targetDate = currentWeekMonday.add(Duration(days: safeIndex));
+    }
+
+    int detectedDayIndex = targetDate.weekday - 1;
 
     final durationResult = VoiceDurationParser.parse(lower);
     int detectedDuration = durationResult.durationMinutes;
@@ -3324,6 +3645,8 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                       'p_reminder_time': selectedReminder,
                                       'p_is_completed': task.isCompleted,
                                       'p_expected_version': task.version,
+                                      'p_request_id':
+                                          'mutation_${task.id}_${task.version + 1}',
                                     },
                                   );
 
@@ -3901,6 +4224,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
           'p_reminder_time': task.reminderTime,
           'p_is_completed': task.isCompleted,
           'p_expected_version': task.version,
+          'p_request_id': 'move_${task.id}_${task.version + 1}',
         },
       );
 
@@ -4083,6 +4407,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
           'p_reminder_time': task.reminderTime,
           'p_is_completed': isCompleted,
           'p_expected_version': task.version,
+          'p_request_id': 'complete_${task.id}_${task.version + 1}',
         },
       );
 
