@@ -13,7 +13,9 @@ void main() {
           title: 'Görev 1',
           category: 'İş',
           dayIndex: 0,
+          scheduledDate: '2026-09-07',
           weekStartDate: '2026-09-07',
+          taskTime: '10:00',
           durationMinutes: 120,
           priority: 'Orta',
         ),
@@ -23,7 +25,9 @@ void main() {
           title: 'Görev 2',
           category: 'Ders',
           dayIndex: 0,
+          scheduledDate: '2026-09-07',
           weekStartDate: '2026-09-07',
+          taskTime: '13:00',
           durationMinutes: 60,
           priority: 'Kritik',
         ),
@@ -34,12 +38,15 @@ void main() {
     });
 
     test('Zaman çakışması doğru tespit edilmeli (Interval Overlap)', () {
+      final targetDate = DateTime(2026, 9, 8);
+
       final taskA = TaskItem(
         id: '1',
         userId: 'u1',
         title: 'Görev A',
         category: 'İş',
         dayIndex: 1,
+        scheduledDate: '2026-09-08',
         weekStartDate: '2026-09-07',
         taskTime: '10:00',
         durationMinutes: 60,
@@ -51,6 +58,7 @@ void main() {
         title: 'Görev B',
         category: 'İş',
         dayIndex: 1,
+        scheduledDate: '2026-09-08',
         weekStartDate: '2026-09-07',
         taskTime: '10:30',
         durationMinutes: 60,
@@ -62,16 +70,19 @@ void main() {
         title: 'Görev C',
         category: 'İş',
         dayIndex: 1,
+        scheduledDate: '2026-09-08',
         weekStartDate: '2026-09-07',
         taskTime: '11:00',
         durationMinutes: 60,
       );
 
-      final targetDate = DateTime(2026, 9, 8);
+      // 10:30 - 11:30 ile 10:00 - 11:00 çakışır
       expect(
         PlanningEngine.wouldConflictOnTargetDay(taskB, targetDate, [taskA]),
         isTrue,
       );
+
+      // 11:00 - 12:00 ile 10:00 - 11:00 çakışmaz (sınır temas)
       expect(
         PlanningEngine.wouldConflictOnTargetDay(taskC, targetDate, [taskA]),
         isFalse,

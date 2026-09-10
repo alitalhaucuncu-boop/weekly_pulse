@@ -2574,13 +2574,12 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                       TaskItem.fromJson(rpcRes['task']);
 
                                   if (modalContext.mounted) {
-                                    Navigator.pop(modalContext);
+                                    Navigator.of(modalContext).pop();
                                   }
 
                                   _fetchTasks();
                                   _fetchAllTasksForMonth(focusedCalendarDay);
 
-                                  // P1 FIX: Await edilerek tam senkronizasyon sonucu kullanıcıya gösterilir
                                   final syncResult = await TaskSyncCoordinator
                                       .coordinateTaskSync(
                                     task: createdTask,
@@ -2964,7 +2963,6 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
         } else {
           final targetDate =
               DateTime.tryParse(task.scheduledDate ?? '') ?? DateTime.now();
-          // P1 FIX: Await edilerek arka plan senkronizasyonu tamamlanır
           await TaskSyncCoordinator.coordinateTaskSync(
             task: task,
             targetDate: targetDate,
