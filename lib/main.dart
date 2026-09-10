@@ -1,181 +1,91 @@
-import 'dart:async';
-import 'dart:io';
+import 'dart:ui';
 import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:flutter_local_notifications/flutter_local_notifications.dart';
-import 'package:timezone/data/latest.dart' as tz_data;
-import 'package:timezone/timezone.dart' as tz;
-import 'package:flutter_timezone/flutter_timezone.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-
 import 'core/constants.dart';
 import 'data/notification_service.dart';
 import 'presentation/screens/auth_screen.dart';
 import 'presentation/screens/weekly_planner_screen.dart';
 
-@pragma('vm:entry-point')
-void notificationTapBackground(NotificationResponse notificationResponse) {}
-
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  tz_data.initializeTimeZones();
-  try {
-    final dynamic tzInfo = await FlutterTimezone.getLocalTimezone();
-    final String timeZoneName =
-        (tzInfo is String) ? tzInfo : (tzInfo.name ?? tzInfo.toString());
-    tz.setLocalLocation(tz.getLocation(timeZoneName));
-  } catch (e) {
-    debugPrint('Cihaz saat dilimi okunamadı, varsayılan UTC atanıyor: $e');
-    tz.setLocalLocation(tz.getLocation('UTC'));
-  }
+  // P0: Global Crash Reporting & Error Boundary
+  FlutterError.onError = (FlutterErrorDetails details) {
+    FlutterError.presentError(details);
+    debugPrint('🚨 [CRASH-LOG - FlutterError]: ${details.exceptionAsString()}');
+    debugPrint('Stack trace: ${details.stack}');
+  };
+
+  PlatformDispatcher.instance.onError = (error, stack) {
+    debugPrint('🚨 [CRASH-LOG - PlatformDispatcher]: $error');
+    debugPrint('Stack trace: $stack');
+    return true;
+  };
 
   await Supabase.initialize(
     url: supabaseUrl,
-    // ignore: deprecated_member_use
     anonKey: supabaseAnonKey,
   );
 
-  const AndroidInitializationSettings initializationSettingsAndroid =
-      AndroidInitializationSettings('@mipmap/ic_launcher');
-  const DarwinInitializationSettings initializationSettingsIOS =
-      DarwinInitializationSettings(
-    requestAlertPermission: true,
-    requestBadgePermission: true,
-    requestSoundPermission: true,
-  );
-  const InitializationSettings initializationSettings = InitializationSettings(
-    android: initializationSettingsAndroid,
-    iOS: initializationSettingsIOS,
-  );
+  await NotificationService.initialize();
 
-  await NotificationService.plugin.initialize(
-    initializationSettings,
-    onDidReceiveNotificationResponse: (NotificationResponse response) {
-      if (response.payload != null && response.payload!.isNotEmpty) {
-        if (onGlobalNotificationFocus != null) {
-          onGlobalNotificationFocus!(response.payload!);
-        } else {
-          globalPendingNotificationTaskId = response.payload;
-        }
-      }
-    },
-    onDidReceiveBackgroundNotificationResponse: notificationTapBackground,
-  );
-
-  final NotificationAppLaunchDetails? launchDetails =
-      await NotificationService.plugin.getNotificationAppLaunchDetails();
-  if (launchDetails != null &&
-      launchDetails.didNotificationLaunchApp &&
-      launchDetails.notificationResponse?.payload != null) {
-    globalPendingNotificationTaskId =
-        launchDetails.notificationResponse!.payload;
-  }
-
-  if (!kIsWeb && Platform.isAndroid) {
-    await NotificationService.plugin
-        .resolvePlatformSpecificImplementation<
-            AndroidFlutterLocalNotificationsPlugin>()
-        ?.requestNotificationsPermission();
-  }
-
-  final prefs = await SharedPreferences.getInstance();
-  final bool initialDarkMode = prefs.getBool('is_dark_mode') ?? false;
-
-  runApp(WeeklyPulseApp(initialDarkMode: initialDarkMode));
+  runApp(const WeeklyPulseApp());
 }
 
 class WeeklyPulseApp extends StatefulWidget {
-  final bool initialDarkMode;
-  const WeeklyPulseApp({super.key, required this.initialDarkMode});
+  const WeeklyPulseApp({super.key});
 
   @override
   State<WeeklyPulseApp> createState() => _WeeklyPulseAppState();
 }
 
 class _WeeklyPulseAppState extends State<WeeklyPulseApp> {
-  late bool isDarkMode;
-  StreamSubscription<AuthState>? _authSubscription;
-  final GlobalKey<NavigatorState> _navigatorKey = GlobalKey<NavigatorState>();
+  bool _isDark = false;
 
-  @override
-  void initState() {
-    super.initState();
-    isDarkMode = widget.initialDarkMode;
-
-    // P1-03: Oturum değişimlerini ve token bitişini merkezi olarak dinle
-    _authSubscription = supabase.auth.onAuthStateChange.listen((data) {
-      final AuthChangeEvent event = data.event;
-      if (event == AuthChangeEvent.signedOut ||
-          event == AuthChangeEvent.tokenRefreshed) {
-        if (data.session == null && mounted) {
-          _navigatorKey.currentState?.pushAndRemoveUntil(
-            MaterialPageRoute(
-              builder: (_) => AuthScreen(
-                onThemeToggle: toggleTheme,
-                isDark: isDarkMode,
-              ),
-            ),
-            (route) => false,
-          );
-        }
-      }
+  void _toggleTheme() {
+    setState(() {
+      _isDark = !_isDark;
     });
   }
 
   @override
-  void dispose() {
-    _authSubscription?.cancel();
-    super.dispose();
-  }
-
-  void toggleTheme() async {
-    setState(() => isDarkMode = !isDarkMode);
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool('is_dark_mode', isDarkMode);
-  }
-
-  @override
   Widget build(BuildContext context) {
+    final session = supabase.auth.currentSession;
+
     return MaterialApp(
-      navigatorKey: _navigatorKey,
       title: 'WeeklyPulse',
       debugShowCheckedModeBanner: false,
-      themeMode: isDarkMode ? ThemeMode.dark : ThemeMode.light,
       theme: ThemeData(
         brightness: Brightness.light,
-        scaffoldBackgroundColor: const Color(0xFFFFFFFF),
-        cardColor: const Color(0xFFF5F5F7),
-        appBarTheme: const AppBarTheme(
-          backgroundColor: Colors.transparent,
-          elevation: 0,
-          iconTheme: IconThemeData(color: Colors.black87),
-          titleTextStyle: TextStyle(
-              color: Colors.black87, fontSize: 18, fontWeight: FontWeight.bold),
+        primaryColor: const Color(0xFF4A55A2),
+        scaffoldBackgroundColor: const Color(0xFFF5F7FB),
+        cardColor: Colors.white,
+        colorScheme: const ColorScheme.light(
+          primary: Color(0xFF4A55A2),
+          secondary: Color(0xFF7895CB),
         ),
-        colorSchemeSeed: const Color(0xFF4A55A2),
         useMaterial3: true,
       ),
       darkTheme: ThemeData(
         brightness: Brightness.dark,
-        scaffoldBackgroundColor: const Color(0xFF121212),
-        cardColor: const Color(0xFF1E1E1E),
-        appBarTheme: const AppBarTheme(
-          backgroundColor: Colors.transparent,
-          elevation: 0,
-          iconTheme: IconThemeData(color: Colors.white),
-          titleTextStyle: TextStyle(
-              color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
+        primaryColor: const Color(0xFF7895CB),
+        scaffoldBackgroundColor: const Color(0xFF0F172A),
+        cardColor: const Color(0xFF1E293B),
+        colorScheme: const ColorScheme.dark(
+          primary: Color(0xFF7895CB),
+          secondary: Color(0xFFA0BFE0),
         ),
-        colorSchemeSeed: const Color(0xFF7895CB),
         useMaterial3: true,
       ),
-      home: supabase.auth.currentSession == null
-          ? AuthScreen(onThemeToggle: toggleTheme, isDark: isDarkMode)
-          : WeeklyPlannerScreen(
-              isDark: isDarkMode,
-              onThemeToggle: toggleTheme,
+      themeMode: _isDark ? ThemeMode.dark : ThemeMode.light,
+      home: session != null
+          ? WeeklyPlannerScreen(
+              isDark: _isDark,
+              onThemeToggle: _toggleTheme,
+            )
+          : AuthScreen(
+              isDark: _isDark,
+              onThemeToggle: _toggleTheme,
             ),
     );
   }

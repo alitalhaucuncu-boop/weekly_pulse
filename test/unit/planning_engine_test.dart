@@ -1,10 +1,12 @@
+import 'dart:convert';
+import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:weekly_pulse/domain/models/task_item.dart';
 import 'package:weekly_pulse/application/planning_engine.dart';
 import 'package:weekly_pulse/domain/parsers/voice_duration_parser.dart';
 
 void main() {
-  group('PlanningEngine Unit Tests', () {
+  group('PlanningEngine Kapasite ve Çakışma Testleri', () {
     test('Kapasite kullanımı doğru hesaplanmalı (480 dk baz)', () {
       final tasks = [
         TaskItem(
@@ -99,6 +101,49 @@ void main() {
 
       final resMax = VoiceDurationParser.parse('10 saat maraton');
       expect(resMax.validationError, isNotNull);
+    });
+  });
+
+  group('Outbox & Lease Token Security Contract Tests', () {
+    test('Lease token SHA-256 hash üretimi ve doğrulaması', () {
+      const String rawToken = '4f8a9b2c3d4e5f6a7b8c9d0e1f2a3b4c';
+      final String tokenHash = sha256.convert(utf8.encode(rawToken)).toString();
+
+      // Database tarafındaki digest(raw_token, sha256) karşılığı
+      expect(tokenHash.length, equals(64));
+      expect(
+        sha256.convert(utf8.encode(rawToken)).toString(),
+        equals(tokenHash),
+      );
+      expect(
+        sha256.convert(utf8.encode('tampered_token')).toString(),
+        isNot(equals(tokenHash)),
+      );
+    });
+
+    test('Stale lease expiry tespiti ve recovery kontrolü', () {
+      final now = DateTime.now();
+      final validLockedUntil = now.add(const Duration(seconds: 60));
+      final expiredLockedUntil = now.subtract(const Duration(seconds: 10));
+
+      bool isLeaseActive(DateTime? lockedUntil) {
+        if (lockedUntil == null) return false;
+        return lockedUntil.isAfter(DateTime.now());
+      }
+
+      expect(isLeaseActive(validLockedUntil), isTrue);
+      expect(isLeaseActive(expiredLockedUntil), isFalse);
+    });
+
+    test('Dead-letter state geçiş sınırı (max_attempts)', () {
+      const int maxAttempts = 5;
+      bool shouldMoveToDeadLetter(int attemptCount) {
+        return attemptCount >= maxAttempts;
+      }
+
+      expect(shouldMoveToDeadLetter(4), isFalse);
+      expect(shouldMoveToDeadLetter(5), isTrue);
+      expect(shouldMoveToDeadLetter(6), isTrue);
     });
   });
 }

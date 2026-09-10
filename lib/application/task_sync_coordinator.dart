@@ -56,7 +56,6 @@ class TaskSyncCoordinator {
           notifSuccess = true;
         } else if (scheduleStatus ==
             NotificationScheduleResult.skippedNoReminder) {
-          // P1: Kullanıcı bilinçli olarak hatırlatma istemediğinde başarılı kabul et
           notifSuccess = true;
         } else if (scheduleStatus == NotificationScheduleResult.skippedPast) {
           notifSkippedPast = true;
@@ -159,7 +158,7 @@ class TaskSyncCoordinator {
     );
   }
 
-  // P0/P1: Lease Token Doğrulamalı ve Whitelist Güvenlikli Reconcile
+  // P0/P1: Hash-protected lease token ve best-effort ack destekli reconcile
   static Future<int> reconcilePendingAndFailedTasks() async {
     final user = supabase.auth.currentUser;
     if (user == null) return 0;
@@ -189,12 +188,12 @@ class TaskSyncCoordinator {
           String? verifiedEventId;
           String? errorMessage;
 
-          // P1: Notification cancel sonucunu gerçek bool üzerinden kontrol et
+          // P0: Bildirim için best_effort_client_ack semantiği
           if (notifId != null) {
             final bool cancelled =
                 await NotificationService.cancelNotification(notifId);
             if (cancelled) {
-              notifStatus = 'client_acknowledged';
+              notifStatus = 'best_effort_client_ack';
             } else {
               notifStatus = 'failed';
               errorMessage = "Bildirim iptal edilemedi.";
