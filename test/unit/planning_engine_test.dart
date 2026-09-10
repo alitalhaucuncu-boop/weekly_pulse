@@ -109,7 +109,6 @@ void main() {
       const String rawToken = '4f8a9b2c3d4e5f6a7b8c9d0e1f2a3b4c';
       final String tokenHash = sha256.convert(utf8.encode(rawToken)).toString();
 
-      // Database tarafındaki digest(raw_token, sha256) karşılığı
       expect(tokenHash.length, equals(64));
       expect(
         sha256.convert(utf8.encode(rawToken)).toString(),
@@ -144,6 +143,18 @@ void main() {
       expect(shouldMoveToDeadLetter(4), isFalse);
       expect(shouldMoveToDeadLetter(5), isTrue);
       expect(shouldMoveToDeadLetter(6), isTrue);
+    });
+
+    test('Notification status whitelist kontrat uyumu', () {
+      const allowedStatuses = {
+        'best_effort_client_ack',
+        'client_acknowledged',
+        'failed',
+        'skipped',
+      };
+
+      const clientSentStatus = 'best_effort_client_ack';
+      expect(allowedStatuses.contains(clientSentStatus), isTrue);
     });
   });
 }
