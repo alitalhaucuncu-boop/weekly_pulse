@@ -27,6 +27,7 @@ void main() async {
     anonKey: supabaseAnonKey,
   );
 
+  // Tekil Notification Başlatma
   await NotificationService.initialize();
 
   runApp(const WeeklyPulseApp());

@@ -61,6 +61,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
   String? _taskFetchError;
   final Set<String> _movingTaskIds = <String>{};
 
+  // P1: Fetch Race Condition Koruması için sayaç
+  int _fetchGeneration = 0;
+
   late DateTime currentWeekMonday;
   late ConfettiController _confettiController;
 
@@ -1659,6 +1662,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                       ),
                     ),
                     const SizedBox(height: 16),
+                    // P1: onChanged ile manuel klavye düzenlemesi anında yeniden ayrıştırılır
                     TextField(
                       controller: speechController,
                       maxLines: 2,
@@ -1666,6 +1670,11 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                         labelText: 'Algılanan Metin',
                         border: OutlineInputBorder(),
                       ),
+                      onChanged: (val) {
+                        setStateDialog(() {
+                          parsedResult = _parseVoiceCommandToTask(val);
+                        });
+                      },
                     ),
                     const SizedBox(height: 12),
                     Container(
@@ -2525,6 +2534,14 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                     Duration(days: targetDate.weekday - 1));
                                 final derivedDayIndex = targetDate.weekday - 1;
 
+                                // P0: Client Request ID oluşturuluyor (Idempotent Create)
+                                final randomSuffix = Random()
+                                    .nextInt(999999)
+                                    .toString()
+                                    .padLeft(6, '0');
+                                final String clientRequestId =
+                                    "create_${user.id}_${DateTime.now().millisecondsSinceEpoch}_$randomSuffix";
+
                                 try {
                                   final rpcRes = await supabase.rpc(
                                     'create_task_with_outbox',
@@ -2543,6 +2560,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                       'p_deadline':
                                           selectedDeadline?.toIso8601String(),
                                       'p_reminder_time': selectedReminder,
+                                      'p_request_id': clientRequestId,
                                     },
                                   );
 
@@ -2612,7 +2630,11 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
     });
   }
 
+  // P1: Fetch Race Condition Koruması
   Future<void> _fetchTasks() async {
+    final int generation = ++_fetchGeneration;
+    final String targetWeekKey = _formatDateToKey(currentWeekMonday);
+
     setState(() {
       _isLoadingTasks = true;
       _taskFetchError = null;
@@ -2623,14 +2645,18 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
         return;
       }
 
-      final weekKey = _formatDateToKey(currentWeekMonday);
       final response = await supabase
           .from('weekly_tasks')
           .select()
           .eq('user_id', user.id)
-          .eq('week_start_date', weekKey)
+          .eq('week_start_date', targetWeekKey)
           .order('scheduled_date', ascending: true)
           .order('task_time', ascending: true);
+
+      // Eğer kullanıcı başka bir haftaya tıkladıysa eski cevabı yoksay
+      if (generation != _fetchGeneration) {
+        return;
+      }
 
       List<TaskItem> loaded = [];
       for (var row in response) {
@@ -2645,14 +2671,14 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
       }
     } catch (e) {
       debugPrint('Çekme Hatası: $e');
-      if (mounted) {
+      if (mounted && generation == _fetchGeneration) {
         setState(() {
           _taskFetchError =
               'Planlar yüklenemedi. İnternet bağlantınızı kontrol edin.';
         });
       }
     } finally {
-      if (mounted) {
+      if (mounted && generation == _fetchGeneration) {
         setState(() => _isLoadingTasks = false);
       }
     }

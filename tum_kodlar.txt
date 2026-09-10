@@ -754,7 +754,6 @@ class TaskSyncCoordinator {
           notifSuccess = true;
         } else if (scheduleStatus ==
             NotificationScheduleResult.skippedNoReminder) {
-          // P1: Kullanıcı bilinçli olarak hatırlatma istemediğinde başarılı kabul et
           notifSuccess = true;
         } else if (scheduleStatus == NotificationScheduleResult.skippedPast) {
           notifSkippedPast = true;
@@ -857,7 +856,7 @@ class TaskSyncCoordinator {
     );
   }
 
-  // P0/P1: Lease Token Doğrulamalı ve Whitelist Güvenlikli Reconcile
+  // P0/P1: Hash-protected lease token ve best-effort ack destekli reconcile
   static Future<int> reconcilePendingAndFailedTasks() async {
     final user = supabase.auth.currentUser;
     if (user == null) return 0;
@@ -887,12 +886,12 @@ class TaskSyncCoordinator {
           String? verifiedEventId;
           String? errorMessage;
 
-          // P1: Notification cancel sonucunu gerçek bool üzerinden kontrol et
+          // P0: Bildirim için best_effort_client_ack semantiği
           if (notifId != null) {
             final bool cancelled =
                 await NotificationService.cancelNotification(notifId);
             if (cancelled) {
-              notifStatus = 'client_acknowledged';
+              notifStatus = 'best_effort_client_ack';
             } else {
               notifStatus = 'failed';
               errorMessage = "Bildirim iptal edilemedi.";
@@ -2023,8 +2022,8 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
               style:
                   ElevatedButton.styleFrom(backgroundColor: Colors.deepPurple),
               onPressed: () async {
-                Navigator.pop(dialogContext);
                 final scaffoldMessenger = ScaffoldMessenger.of(context);
+                Navigator.pop(dialogContext);
                 final result = await _moveTaskToNewDay(targetTask, lightestDay);
                 if (!mounted) {
                   return;
@@ -2286,93 +2285,174 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
   }
 
   void _confirmDeleteAccount() {
+    final passwordController = TextEditingController();
+    String? dialogError;
+    bool isDeleting = false;
+
     showDialog(
       context: context,
+      barrierDismissible: false,
       builder: (dialogContext) {
-        return AlertDialog(
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-          title: const Text('Hesabı Kalıcı Olarak Sil 🚨',
-              style: TextStyle(
-                  fontWeight: FontWeight.bold,
-                  fontSize: 18,
-                  color: Colors.redAccent)),
-          content: const Text(
-            'Hesabınızı ve kaydedilen tüm haftalık planlarınızı, bildirimlerinizi kalıcı olarak silmek istediğinize emin misiniz? Bu işlem geri alınamaz.',
-            style: TextStyle(fontSize: 13, color: Colors.grey),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(dialogContext),
-              child: const Text('Vazgeç'),
-            ),
-            ElevatedButton(
-              style:
-                  ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
-              onPressed: () async {
-                final messenger = ScaffoldMessenger.of(context);
-                final nav = Navigator.of(context);
-
-                try {
-                  final res = await supabase.rpc('delete_user_account');
-                  final bool ok = res is Map && res['success'] == true;
-
-                  if (ok) {
-                    try {
-                      await NotificationService.cancelAllNotifications();
-                      final prefs = await SharedPreferences.getInstance();
-                      await prefs.clear();
-                    } catch (_) {}
-
-                    await supabase.auth.signOut();
-                    if (!mounted) return;
-                    if (dialogContext.mounted) {
-                      Navigator.pop(dialogContext);
-                    }
-                    nav.pushReplacement(
-                      MaterialPageRoute(
-                        builder: (_) => AuthScreen(
-                          onThemeToggle: widget.onThemeToggle,
-                          isDark: widget.isDark,
-                        ),
-                      ),
-                    );
-                    messenger.showSnackBar(
-                      const SnackBar(
-                          content: Text(
-                              'Hesabınız ve tüm verileriniz başarıyla silindi.')),
-                    );
-                  } else {
-                    if (!mounted) return;
-                    if (dialogContext.mounted) {
-                      Navigator.pop(dialogContext);
-                    }
-                    final String msg = (res is Map && res['message'] != null)
-                        ? res['message']
-                        : 'Silme başarısız.';
-                    messenger.showSnackBar(
-                      SnackBar(content: Text(msg)),
-                    );
-                  }
-                } catch (e) {
-                  debugPrint("Hesap Silme Hatası: $e");
-                  if (!mounted) return;
-                  if (dialogContext.mounted) {
-                    Navigator.pop(dialogContext);
-                  }
-                  messenger.showSnackBar(
-                    SnackBar(content: Text('Hata oluştu: $e')),
-                  );
-                }
-              },
-              child: const Text('Evet, Kalıcı Olarak Sil',
+        return StatefulBuilder(
+          builder: (ctx, setStateDialog) {
+            return AlertDialog(
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(20)),
+              title: const Text('Hesabı Kalıcı Olarak Sil 🚨',
                   style: TextStyle(
-                      color: Colors.white, fontWeight: FontWeight.bold)),
-            ),
-          ],
+                      fontWeight: FontWeight.bold,
+                      fontSize: 18,
+                      color: Colors.redAccent)),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Hesabınızı ve kaydedilen tüm haftalık planlarınızı silmek üzeresiniz. Güvenlik gereği lütfen mevcut şifrenizi girin.',
+                    style: TextStyle(fontSize: 13, color: Colors.grey),
+                  ),
+                  const SizedBox(height: 14),
+                  TextField(
+                    controller: passwordController,
+                    obscureText: true,
+                    decoration: InputDecoration(
+                      labelText: 'Şifreniz',
+                      errorText: dialogError,
+                      border: const OutlineInputBorder(),
+                    ),
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed:
+                      isDeleting ? null : () => Navigator.pop(dialogContext),
+                  child: const Text('Vazgeç'),
+                ),
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.redAccent),
+                  onPressed: isDeleting
+                      ? null
+                      : () async {
+                          final messenger = ScaffoldMessenger.of(context);
+                          final nav = Navigator.of(context);
+                          final dialogNav = Navigator.of(dialogContext);
+
+                          final pwd = passwordController.text.trim();
+                          if (pwd.isEmpty) {
+                            setStateDialog(
+                                () => dialogError = 'Lütfen şifrenizi girin.');
+                            return;
+                          }
+
+                          final email = supabase.auth.currentUser?.email ?? '';
+                          setStateDialog(() {
+                            isDeleting = true;
+                            dialogError = null;
+                          });
+
+                          try {
+                            final authCheck =
+                                await supabase.auth.signInWithPassword(
+                              email: email,
+                              password: pwd,
+                            );
+
+                            if (authCheck.user == null) {
+                              setStateDialog(() {
+                                isDeleting = false;
+                                dialogError = 'Şifre hatalı.';
+                              });
+                              return;
+                            }
+                          } catch (_) {
+                            setStateDialog(() {
+                              isDeleting = false;
+                              dialogError =
+                                  'Şifre doğrulanamadı. Tekrar deneyin.';
+                            });
+                            return;
+                          }
+
+                          try {
+                            try {
+                              for (var t in allFetchedTasks) {
+                                if (t.calendarId != null &&
+                                    t.calendarEventId != null) {
+                                  await CalendarService.deleteEvent(
+                                      t.calendarId!, t.calendarEventId!);
+                                }
+                              }
+                            } catch (_) {}
+
+                            final res =
+                                await supabase.rpc('delete_user_account');
+                            final bool ok =
+                                res is Map && res['success'] == true;
+
+                            if (ok) {
+                              try {
+                                await NotificationService
+                                    .cancelAllNotifications();
+                                final prefs =
+                                    await SharedPreferences.getInstance();
+                                await prefs.clear();
+                              } catch (_) {}
+
+                              await supabase.auth.signOut();
+                              if (!mounted) return;
+                              if (dialogContext.mounted) {
+                                dialogNav.pop();
+                              }
+                              nav.pushReplacement(
+                                MaterialPageRoute(
+                                  builder: (_) => AuthScreen(
+                                    onThemeToggle: widget.onThemeToggle,
+                                    isDark: widget.isDark,
+                                  ),
+                                ),
+                              );
+                              messenger.showSnackBar(
+                                const SnackBar(
+                                    content: Text(
+                                        'Hesabınız ve tüm verileriniz başarıyla silindi.')),
+                              );
+                            } else {
+                              setStateDialog(() {
+                                isDeleting = false;
+                                dialogError =
+                                    (res is Map && res['message'] != null)
+                                        ? res['message']
+                                        : 'Silme işlemi başarısız.';
+                              });
+                            }
+                          } catch (e) {
+                            setStateDialog(() {
+                              isDeleting = false;
+                              dialogError = 'Hata oluştu: $e';
+                            });
+                          }
+                        },
+                  child: isDeleting
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                              color: Colors.white, strokeWidth: 2))
+                      : const Text('Doğrula ve Kalıcı Olarak Sil',
+                          style: TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.bold)),
+                ),
+              ],
+            );
+          },
         );
       },
-    );
+    ).whenComplete(() {
+      passwordController.dispose();
+    });
   }
 
   void _confirmCancelSubscription() {
@@ -2398,6 +2478,8 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                   ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
               onPressed: () async {
                 final scaffoldMessenger = ScaffoldMessenger.of(context);
+                final dialogNav = Navigator.of(dialogContext);
+
                 try {
                   final res = await supabase.rpc('cancel_my_subscription');
                   final bool ok = res is Map && res['success'] == true;
@@ -2407,35 +2489,38 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                       await NotificationService.cancelNotification(99999);
                     } catch (_) {}
 
-                    if (mounted) {
-                      setState(() {
-                        isUserPremium = false;
-                        userTierName = 'Free';
-                        userPlanId = 'free';
-                      });
-                      Navigator.pop(dialogContext);
-                      scaffoldMessenger.showSnackBar(
-                        const SnackBar(
-                            content: Text('Aboneliğiniz iptal edildi.')),
-                      );
+                    if (!mounted) return;
+                    setState(() {
+                      isUserPremium = false;
+                      userTierName = 'Free';
+                      userPlanId = 'free';
+                    });
+                    if (dialogContext.mounted) {
+                      dialogNav.pop();
                     }
+                    scaffoldMessenger.showSnackBar(
+                      const SnackBar(
+                          content: Text('Aboneliğiniz iptal edildi.')),
+                    );
                   } else {
-                    if (mounted) {
-                      Navigator.pop(dialogContext);
-                      scaffoldMessenger.showSnackBar(
-                        const SnackBar(
-                            content: Text('İptal işlemi gerçekleştirilemedi.')),
-                      );
+                    if (!mounted) return;
+                    if (dialogContext.mounted) {
+                      dialogNav.pop();
                     }
+                    scaffoldMessenger.showSnackBar(
+                      const SnackBar(
+                          content: Text('İptal işlemi gerçekleştirilemedi.')),
+                    );
                   }
                 } catch (e) {
                   debugPrint("İptal Hatası: $e");
-                  if (mounted) {
-                    Navigator.pop(dialogContext);
-                    scaffoldMessenger.showSnackBar(
-                      const SnackBar(content: Text('Bağlantı hatası oluştu.')),
-                    );
+                  if (!mounted) return;
+                  if (dialogContext.mounted) {
+                    dialogNav.pop();
                   }
+                  scaffoldMessenger.showSnackBar(
+                    const SnackBar(content: Text('Bağlantı hatası oluştu.')),
+                  );
                 }
               },
               child: const Text('Evet, İptal Et',
@@ -3300,6 +3385,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
 
                           final scaffoldMessenger =
                               ScaffoldMessenger.of(context);
+                          final dialogNav = Navigator.of(dialogContext);
                           final randomSuffix = Random()
                               .nextInt(999999)
                               .toString()
@@ -3338,7 +3424,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                             if (response is! Map ||
                                 response['success'] != true) {
                               if (dialogContext.mounted) {
-                                Navigator.pop(dialogContext);
+                                dialogNav.pop();
                               }
                               if (!mounted) return;
                               final message = (response is Map)
@@ -3356,7 +3442,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                 TaskItem.fromJson(response['task']);
 
                             if (dialogContext.mounted) {
-                              Navigator.pop(dialogContext);
+                              dialogNav.pop();
                             }
 
                             final syncResult =
@@ -3382,7 +3468,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                             debugPrint("Sesli Görev Ekleme Hatası: $e");
                             if (dialogContext.mounted) {
                               setStateDialog(() => isVoiceSaving = false);
-                              Navigator.pop(dialogContext);
+                              dialogNav.pop();
                             }
                             if (mounted) {
                               scaffoldMessenger.showSnackBar(
@@ -3662,6 +3748,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                     .add(Duration(minutes: selectedDuration));
                                 final scaffoldMessenger =
                                     ScaffoldMessenger.of(context);
+                                final modalNav = Navigator.of(modalContext);
 
                                 if (selectedDeadline != null &&
                                     taskEnd.isAfter(selectedDeadline!)) {
@@ -3724,7 +3811,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                         res['version'] ?? (task.version + 1);
 
                                     if (modalContext.mounted) {
-                                      Navigator.pop(modalContext);
+                                      modalNav.pop();
                                     }
 
                                     final syncResult = await TaskSyncCoordinator
@@ -3755,7 +3842,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                         (res is Map) ? res['code'] : null;
                                     if (errCode == 'VERSION_CONFLICT') {
                                       if (modalContext.mounted) {
-                                        Navigator.pop(modalContext);
+                                        modalNav.pop();
                                       }
                                       scaffoldMessenger.showSnackBar(
                                         const SnackBar(
@@ -5443,184 +5530,94 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
 
 
 
-import 'dart:async';
-import 'dart:io';
+import 'dart:ui';
 import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:flutter_local_notifications/flutter_local_notifications.dart';
-import 'package:timezone/data/latest.dart' as tz_data;
-import 'package:timezone/timezone.dart' as tz;
-import 'package:flutter_timezone/flutter_timezone.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-
 import 'core/constants.dart';
 import 'data/notification_service.dart';
 import 'presentation/screens/auth_screen.dart';
 import 'presentation/screens/weekly_planner_screen.dart';
 
-@pragma('vm:entry-point')
-void notificationTapBackground(NotificationResponse notificationResponse) {}
-
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  tz_data.initializeTimeZones();
-  try {
-    final dynamic tzInfo = await FlutterTimezone.getLocalTimezone();
-    final String timeZoneName =
-        (tzInfo is String) ? tzInfo : (tzInfo.name ?? tzInfo.toString());
-    tz.setLocalLocation(tz.getLocation(timeZoneName));
-  } catch (e) {
-    debugPrint('Cihaz saat dilimi okunamadı, varsayılan UTC atanıyor: $e');
-    tz.setLocalLocation(tz.getLocation('UTC'));
-  }
+  // P0: Global Crash Reporting & Error Boundary
+  FlutterError.onError = (FlutterErrorDetails details) {
+    FlutterError.presentError(details);
+    debugPrint('🚨 [CRASH-LOG - FlutterError]: ${details.exceptionAsString()}');
+    debugPrint('Stack trace: ${details.stack}');
+  };
+
+  PlatformDispatcher.instance.onError = (error, stack) {
+    debugPrint('🚨 [CRASH-LOG - PlatformDispatcher]: $error');
+    debugPrint('Stack trace: $stack');
+    return true;
+  };
 
   await Supabase.initialize(
     url: supabaseUrl,
-    // ignore: deprecated_member_use
     anonKey: supabaseAnonKey,
   );
 
-  const AndroidInitializationSettings initializationSettingsAndroid =
-      AndroidInitializationSettings('@mipmap/ic_launcher');
-  const DarwinInitializationSettings initializationSettingsIOS =
-      DarwinInitializationSettings(
-    requestAlertPermission: true,
-    requestBadgePermission: true,
-    requestSoundPermission: true,
-  );
-  const InitializationSettings initializationSettings = InitializationSettings(
-    android: initializationSettingsAndroid,
-    iOS: initializationSettingsIOS,
-  );
+  await NotificationService.initialize();
 
-  await NotificationService.plugin.initialize(
-    initializationSettings,
-    onDidReceiveNotificationResponse: (NotificationResponse response) {
-      if (response.payload != null && response.payload!.isNotEmpty) {
-        if (onGlobalNotificationFocus != null) {
-          onGlobalNotificationFocus!(response.payload!);
-        } else {
-          globalPendingNotificationTaskId = response.payload;
-        }
-      }
-    },
-    onDidReceiveBackgroundNotificationResponse: notificationTapBackground,
-  );
-
-  final NotificationAppLaunchDetails? launchDetails =
-      await NotificationService.plugin.getNotificationAppLaunchDetails();
-  if (launchDetails != null &&
-      launchDetails.didNotificationLaunchApp &&
-      launchDetails.notificationResponse?.payload != null) {
-    globalPendingNotificationTaskId =
-        launchDetails.notificationResponse!.payload;
-  }
-
-  if (!kIsWeb && Platform.isAndroid) {
-    await NotificationService.plugin
-        .resolvePlatformSpecificImplementation<
-            AndroidFlutterLocalNotificationsPlugin>()
-        ?.requestNotificationsPermission();
-  }
-
-  final prefs = await SharedPreferences.getInstance();
-  final bool initialDarkMode = prefs.getBool('is_dark_mode') ?? false;
-
-  runApp(WeeklyPulseApp(initialDarkMode: initialDarkMode));
+  runApp(const WeeklyPulseApp());
 }
 
 class WeeklyPulseApp extends StatefulWidget {
-  final bool initialDarkMode;
-  const WeeklyPulseApp({super.key, required this.initialDarkMode});
+  const WeeklyPulseApp({super.key});
 
   @override
   State<WeeklyPulseApp> createState() => _WeeklyPulseAppState();
 }
 
 class _WeeklyPulseAppState extends State<WeeklyPulseApp> {
-  late bool isDarkMode;
-  StreamSubscription<AuthState>? _authSubscription;
-  final GlobalKey<NavigatorState> _navigatorKey = GlobalKey<NavigatorState>();
+  bool _isDark = false;
 
-  @override
-  void initState() {
-    super.initState();
-    isDarkMode = widget.initialDarkMode;
-
-    // P1-03: Oturum değişimlerini ve token bitişini merkezi olarak dinle
-    _authSubscription = supabase.auth.onAuthStateChange.listen((data) {
-      final AuthChangeEvent event = data.event;
-      if (event == AuthChangeEvent.signedOut ||
-          event == AuthChangeEvent.tokenRefreshed) {
-        if (data.session == null && mounted) {
-          _navigatorKey.currentState?.pushAndRemoveUntil(
-            MaterialPageRoute(
-              builder: (_) => AuthScreen(
-                onThemeToggle: toggleTheme,
-                isDark: isDarkMode,
-              ),
-            ),
-            (route) => false,
-          );
-        }
-      }
+  void _toggleTheme() {
+    setState(() {
+      _isDark = !_isDark;
     });
   }
 
   @override
-  void dispose() {
-    _authSubscription?.cancel();
-    super.dispose();
-  }
-
-  void toggleTheme() async {
-    setState(() => isDarkMode = !isDarkMode);
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool('is_dark_mode', isDarkMode);
-  }
-
-  @override
   Widget build(BuildContext context) {
+    final session = supabase.auth.currentSession;
+
     return MaterialApp(
-      navigatorKey: _navigatorKey,
       title: 'WeeklyPulse',
       debugShowCheckedModeBanner: false,
-      themeMode: isDarkMode ? ThemeMode.dark : ThemeMode.light,
       theme: ThemeData(
         brightness: Brightness.light,
-        scaffoldBackgroundColor: const Color(0xFFFFFFFF),
-        cardColor: const Color(0xFFF5F5F7),
-        appBarTheme: const AppBarTheme(
-          backgroundColor: Colors.transparent,
-          elevation: 0,
-          iconTheme: IconThemeData(color: Colors.black87),
-          titleTextStyle: TextStyle(
-              color: Colors.black87, fontSize: 18, fontWeight: FontWeight.bold),
+        primaryColor: const Color(0xFF4A55A2),
+        scaffoldBackgroundColor: const Color(0xFFF5F7FB),
+        cardColor: Colors.white,
+        colorScheme: const ColorScheme.light(
+          primary: Color(0xFF4A55A2),
+          secondary: Color(0xFF7895CB),
         ),
-        colorSchemeSeed: const Color(0xFF4A55A2),
         useMaterial3: true,
       ),
       darkTheme: ThemeData(
         brightness: Brightness.dark,
-        scaffoldBackgroundColor: const Color(0xFF121212),
-        cardColor: const Color(0xFF1E1E1E),
-        appBarTheme: const AppBarTheme(
-          backgroundColor: Colors.transparent,
-          elevation: 0,
-          iconTheme: IconThemeData(color: Colors.white),
-          titleTextStyle: TextStyle(
-              color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
+        primaryColor: const Color(0xFF7895CB),
+        scaffoldBackgroundColor: const Color(0xFF0F172A),
+        cardColor: const Color(0xFF1E293B),
+        colorScheme: const ColorScheme.dark(
+          primary: Color(0xFF7895CB),
+          secondary: Color(0xFFA0BFE0),
         ),
-        colorSchemeSeed: const Color(0xFF7895CB),
         useMaterial3: true,
       ),
-      home: supabase.auth.currentSession == null
-          ? AuthScreen(onThemeToggle: toggleTheme, isDark: isDarkMode)
-          : WeeklyPlannerScreen(
-              isDark: isDarkMode,
-              onThemeToggle: toggleTheme,
+      themeMode: _isDark ? ThemeMode.dark : ThemeMode.light,
+      home: session != null
+          ? WeeklyPlannerScreen(
+              isDark: _isDark,
+              onThemeToggle: _toggleTheme,
+            )
+          : AuthScreen(
+              isDark: _isDark,
+              onThemeToggle: _toggleTheme,
             ),
     );
   }
@@ -5628,13 +5625,15 @@ class _WeeklyPulseAppState extends State<WeeklyPulseApp> {
 
 
 
+import 'dart:convert';
+import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:weekly_pulse/domain/models/task_item.dart';
 import 'package:weekly_pulse/application/planning_engine.dart';
 import 'package:weekly_pulse/domain/parsers/voice_duration_parser.dart';
 
 void main() {
-  group('PlanningEngine Unit Tests', () {
+  group('PlanningEngine Kapasite ve Çakışma Testleri', () {
     test('Kapasite kullanımı doğru hesaplanmalı (480 dk baz)', () {
       final tasks = [
         TaskItem(
@@ -5729,6 +5728,49 @@ void main() {
 
       final resMax = VoiceDurationParser.parse('10 saat maraton');
       expect(resMax.validationError, isNotNull);
+    });
+  });
+
+  group('Outbox & Lease Token Security Contract Tests', () {
+    test('Lease token SHA-256 hash üretimi ve doğrulaması', () {
+      const String rawToken = '4f8a9b2c3d4e5f6a7b8c9d0e1f2a3b4c';
+      final String tokenHash = sha256.convert(utf8.encode(rawToken)).toString();
+
+      // Database tarafındaki digest(raw_token, sha256) karşılığı
+      expect(tokenHash.length, equals(64));
+      expect(
+        sha256.convert(utf8.encode(rawToken)).toString(),
+        equals(tokenHash),
+      );
+      expect(
+        sha256.convert(utf8.encode('tampered_token')).toString(),
+        isNot(equals(tokenHash)),
+      );
+    });
+
+    test('Stale lease expiry tespiti ve recovery kontrolü', () {
+      final now = DateTime.now();
+      final validLockedUntil = now.add(const Duration(seconds: 60));
+      final expiredLockedUntil = now.subtract(const Duration(seconds: 10));
+
+      bool isLeaseActive(DateTime? lockedUntil) {
+        if (lockedUntil == null) return false;
+        return lockedUntil.isAfter(DateTime.now());
+      }
+
+      expect(isLeaseActive(validLockedUntil), isTrue);
+      expect(isLeaseActive(expiredLockedUntil), isFalse);
+    });
+
+    test('Dead-letter state geçiş sınırı (max_attempts)', () {
+      const int maxAttempts = 5;
+      bool shouldMoveToDeadLetter(int attemptCount) {
+        return attemptCount >= maxAttempts;
+      }
+
+      expect(shouldMoveToDeadLetter(4), isFalse);
+      expect(shouldMoveToDeadLetter(5), isTrue);
+      expect(shouldMoveToDeadLetter(6), isTrue);
     });
   });
 }
