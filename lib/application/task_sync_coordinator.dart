@@ -20,7 +20,9 @@ class TaskSyncResult {
   bool get isFullySynced => isNotificationSynced && isCalendarSynced;
 
   String? get effectiveUserMessage {
-    if (isFullySynced) return null;
+    if (isFullySynced) {
+      return null;
+    }
     List<String> errors = [];
     if (!isNotificationSynced && notificationMessage != null) {
       errors.add(notificationMessage!);
@@ -33,7 +35,6 @@ class TaskSyncResult {
 }
 
 class TaskSyncCoordinator {
-  // WP-005 FIX: Per-task paralel sync kilit seti
   static final Set<String> _activeSyncTaskIds = <String>{};
 
   static Future<TaskSyncResult> coordinateTaskSync({
@@ -73,7 +74,6 @@ class TaskSyncCoordinator {
       String? externalCalId = task.calendarId;
       String? externalEventId = task.calendarEventId;
 
-      // WP-006 FIX: Görev tamamlandıysa takvimden sil, aksi halde ekle/güncelle
       if (task.isCompleted) {
         if (externalCalId != null && externalEventId != null) {
           await CalendarService.deleteEvent(externalCalId, externalEventId);
@@ -108,6 +108,7 @@ class TaskSyncCoordinator {
         final user = supabase.auth.currentUser;
         if (user != null) {
           final newStatus = (notifSuccess && calSuccess) ? 'synced' : 'partial';
+          // AUD-017 FIX: Version guard ile stale metadata ezilmesi önlendi
           await supabase
               .from('weekly_tasks')
               .update({
@@ -118,7 +119,8 @@ class TaskSyncCoordinator {
                 'last_synced_at': DateTime.now().toIso8601String(),
               })
               .eq('id', task.id)
-              .eq('user_id', user.id);
+              .eq('user_id', user.id)
+              .eq('version', task.version);
         }
       } catch (e) {
         debugPrint("Metadata güncelleme hatası: $e");
@@ -139,7 +141,9 @@ class TaskSyncCoordinator {
     int reconciled = 0;
     try {
       final user = supabase.auth.currentUser;
-      if (user == null) return 0;
+      if (user == null) {
+        return 0;
+      }
 
       final dynamic claimRes = await supabase.rpc(
         'claim_pending_delete_operations',
@@ -170,19 +174,32 @@ class TaskSyncCoordinator {
           if (calId != null && calEventId != null) {
             final deleted = await CalendarService.deleteEvent(
                 calId.toString(), calEventId.toString());
-            calStatus = deleted ? 'provider_verified' : 'provider_not_found';
-            verifiedEventId = deleted ? calEventId.toString() : 'not_found';
+            // AUD-001 FIX: Silme başarısızsa provider_not_found yerine failed gönderilir
+            if (deleted) {
+              calStatus = 'provider_verified';
+              verifiedEventId = calEventId.toString();
+            } else {
+              calStatus = 'failed';
+              verifiedEventId = null;
+            }
           }
 
           if (leaseToken != null) {
-            await supabase.rpc('report_delete_side_effects', params: {
+            final dynamic reportRes =
+                await supabase.rpc('report_delete_side_effects', params: {
               'p_operation_id': opId,
               'p_lease_token': leaseToken,
               'p_notification_status': notifStatus,
               'p_calendar_status': calStatus,
               'p_verified_event_id': verifiedEventId,
             });
-            reconciled++;
+
+            // AUD-002 FIX: Yalnızca sunucu completed döndüğünde reconciled say
+            if (reportRes is Map &&
+                reportRes['success'] == true &&
+                reportRes['status'] == 'completed') {
+              reconciled++;
+            }
           }
         }
       }

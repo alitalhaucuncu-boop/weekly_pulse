@@ -1,9 +1,6 @@
--- WeeklyPulse Canonical Production Migration v28 (Full Inventory & Parity)
--- Tüm RPC'ler, pgcrypto hash desteği, outbox ve RLS güvenlik kurallarını içerir.
-
+-- WeeklyPulse Canonical Production Migration v30 (Full Inventory & Parity)
 CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
 
--- 1. TABLOLAR
 CREATE TABLE IF NOT EXISTS public.profiles (
     id uuid PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
     email text,
@@ -64,7 +61,6 @@ CREATE TABLE IF NOT EXISTS public.sync_operations (
 
 ALTER TABLE public.sync_operations ALTER COLUMN task_id DROP NOT NULL;
 
--- 2. RLS KORUMALARI
 ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.weekly_tasks ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.sync_operations ENABLE ROW LEVEL SECURITY;
@@ -78,12 +74,12 @@ DO $$ BEGIN
     CREATE POLICY "Users can manage their own tasks" ON public.weekly_tasks
         FOR ALL TO authenticated USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);
 
-    DROP POLICY IF EXISTS "Users can manage their own sync operations" ON public.sync_operations;
-    CREATE POLICY "Users can manage their own sync operations" ON public.sync_operations
-        FOR ALL TO authenticated USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);
+    DROP POLICY IF EXISTS "Users can view their own sync operations" ON public.sync_operations;
+    CREATE POLICY "Users can view their own sync operations" ON public.sync_operations
+        FOR SELECT TO authenticated USING (auth.uid() = user_id);
 END $$;
 
--- 3. RPC: sync_my_profile_status (AUD-008)
+-- RPCs
 CREATE OR REPLACE FUNCTION public.sync_my_profile_status()
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -117,7 +113,6 @@ BEGIN
 END;
 $$;
 
--- 4. RPC: consume_ai_quota & refund_ai_quota (AUD-008)
 CREATE OR REPLACE FUNCTION public.consume_ai_quota(p_request_id text)
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -179,7 +174,6 @@ BEGIN
 END;
 $$;
 
--- 5. RPC: cancel_my_subscription (AUD-008)
 CREATE OR REPLACE FUNCTION public.cancel_my_subscription()
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -202,7 +196,6 @@ BEGIN
 END;
 $$;
 
--- 6. RPC: create_task_with_outbox
 CREATE OR REPLACE FUNCTION public.create_task_with_outbox(
     p_title text,
     p_category text,
@@ -310,7 +303,6 @@ BEGIN
 END;
 $$;
 
--- 7. RPC: save_task_mutation
 CREATE OR REPLACE FUNCTION public.save_task_mutation(
     p_task_id uuid,
     p_title text,
@@ -321,10 +313,10 @@ CREATE OR REPLACE FUNCTION public.save_task_mutation(
     p_task_time text,
     p_duration_minutes integer,
     p_priority text,
+    p_expected_version integer,
     p_deadline timestamptz DEFAULT NULL,
     p_reminder_time text DEFAULT '1 Saat Önce',
     p_is_completed boolean DEFAULT false,
-    p_expected_version integer DEFAULT 1,
     p_request_id text DEFAULT NULL
 )
 RETURNS jsonb
@@ -337,10 +329,48 @@ DECLARE
     v_curr_task record;
     v_new_version integer;
     v_idempotency_key text;
+    v_task_start timestamptz;
+    v_task_end timestamptz;
 BEGIN
     v_user_id := auth.uid();
     IF v_user_id IS NULL THEN
         RETURN jsonb_build_object('success', false, 'code', 'UNAUTHORIZED', 'message', 'Oturum bulunamadı.');
+    END IF;
+
+    IF p_expected_version IS NULL THEN
+        RETURN jsonb_build_object('success', false, 'code', 'VERSION_REQUIRED', 'message', 'Versiyon numarası zorunludur.');
+    END IF;
+
+    IF trim(p_title) = '' OR length(p_title) > 200 THEN
+        RETURN jsonb_build_object('success', false, 'code', 'INVALID_TITLE', 'message', 'Geçersiz görev başlığı.');
+    END IF;
+
+    IF p_duration_minutes < 15 OR p_duration_minutes > 480 THEN
+        RETURN jsonb_build_object('success', false, 'code', 'INVALID_DURATION', 'message', 'Süre 15-480 dakika arasında olmalıdır.');
+    END IF;
+
+    IF p_day_index < 0 OR p_day_index > 6 THEN
+        RETURN jsonb_build_object('success', false, 'code', 'INVALID_DAY_INDEX', 'message', 'Gün indeksi 0 ile 6 arasında olmalıdır.');
+    END IF;
+
+    IF p_priority NOT IN ('Düşük', 'Orta', 'Yüksek', 'Kritik') THEN
+        RETURN jsonb_build_object('success', false, 'code', 'INVALID_PRIORITY', 'message', 'Geçersiz öncelik seviyesi.');
+    END IF;
+
+    IF p_task_time !~ '^([01][0-9]|2[0-3]):[0-5][0-9]$' THEN
+        RETURN jsonb_build_object('success', false, 'code', 'INVALID_TASK_TIME', 'message', 'Saat formatı HH:mm olmalıdır.');
+    END IF;
+
+    IF p_deadline IS NOT NULL THEN
+        BEGIN
+            v_task_start := (p_scheduled_date || ' ' || p_task_time || ':00')::timestamptz;
+            v_task_end := v_task_start + (p_duration_minutes || ' minutes')::interval;
+            IF v_task_end > p_deadline THEN
+                RETURN jsonb_build_object('success', false, 'code', 'DEADLINE_EXCEEDED', 'message', 'Görev bitiş saati teslim tarihini geçemez.');
+            END IF;
+        EXCEPTION WHEN OTHERS THEN
+            RETURN jsonb_build_object('success', false, 'code', 'INVALID_DATE_FORMAT', 'message', 'Geçersiz tarih formatı.');
+        END;
     END IF;
 
     SELECT * INTO v_curr_task FROM public.weekly_tasks WHERE id = p_task_id AND user_id = v_user_id FOR UPDATE;
@@ -349,7 +379,12 @@ BEGIN
     END IF;
 
     IF v_curr_task.version <> p_expected_version THEN
-        RETURN jsonb_build_object('success', false, 'code', 'VERSION_CONFLICT', 'message', 'Versiyon çakışması tespit edildi.', 'server_version', v_curr_task.version);
+        RETURN jsonb_build_object(
+            'success', false,
+            'code', 'VERSION_CONFLICT',
+            'message', 'Versiyon çakışması tespit edildi.',
+            'server_version', v_curr_task.version
+        );
     END IF;
 
     v_new_version := v_curr_task.version + 1;
@@ -381,7 +416,6 @@ BEGIN
 END;
 $$;
 
--- 8. RPC: claim_pending_delete_operations & report_delete_side_effects (AUD-001, AUD-002, AUD-004, AUD-005)
 CREATE OR REPLACE FUNCTION public.claim_pending_delete_operations(
     p_limit integer DEFAULT 10,
     p_lease_seconds integer DEFAULT 60
@@ -471,7 +505,6 @@ BEGIN
         RETURN jsonb_build_object('success', false, 'code', 'UNAUTHORIZED', 'message', 'Oturum bulunamadı.');
     END IF;
 
-    -- AUD-001: İki taraflı tam sözleşme uyumu
     IF p_notification_status NOT IN ('best_effort_client_ack', 'client_acknowledged', 'failed', 'skipped') THEN
         RETURN jsonb_build_object('success', false, 'code', 'INVALID_SIDE_EFFECT_STATUS', 'message', 'Geçersiz bildirim statüsü.');
     END IF;
@@ -501,7 +534,6 @@ BEGIN
     v_expected_event_id := v_op.desired_state->>'calendar_event_id';
     v_expected_notif_id := v_op.desired_state->>'notification_id';
 
-    -- Takvim Yan Etki Doğrulaması
     IF v_expected_event_id IS NULL OR v_expected_event_id = '' THEN
         v_is_calendar_verified := true;
     ELSIF p_calendar_status IN ('provider_verified', 'provider_not_found') 
@@ -511,7 +543,6 @@ BEGIN
         v_is_calendar_verified := false;
     END IF;
 
-    -- AUD-002 FIX: notification_id varken skipped kabul edilmez
     IF v_expected_notif_id IS NULL OR v_expected_notif_id = '' THEN
         v_is_notif_acknowledged := true;
     ELSIF p_notification_status IN ('best_effort_client_ack', 'client_acknowledged') THEN
@@ -558,7 +589,6 @@ BEGIN
 END;
 $$;
 
--- 9. RPC: delete_task_durable
 CREATE OR REPLACE FUNCTION public.delete_task_durable(p_task_id uuid)
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -603,7 +633,6 @@ BEGIN
 END;
 $$;
 
--- 10. RPC: create_voice_task_with_quota
 CREATE OR REPLACE FUNCTION public.create_voice_task_with_quota(
     p_request_id text,
     p_title text,
@@ -625,27 +654,66 @@ SET search_path = public, extensions, pg_temp
 AS $$
 DECLARE
     v_user_id uuid;
-    v_is_premium boolean;
-    v_voice_usage integer;
+    v_profile record;
     v_new_task record;
     v_clean_title text;
-    v_task_time text;
-    v_duration integer;
-    v_priority text;
-    v_mode text;
-    v_day_idx integer;
+    v_task_start timestamptz;
+    v_task_end timestamptz;
 BEGIN
     v_user_id := auth.uid();
     IF v_user_id IS NULL THEN
         RETURN jsonb_build_object('success', false, 'code', 'UNAUTHORIZED', 'message', 'Oturum bulunamadı.');
     END IF;
 
-    SELECT is_premium, coalesce(voice_command_usage, 0)
-    INTO v_is_premium, v_voice_usage
-    FROM public.profiles
-    WHERE id = v_user_id;
+    v_clean_title := trim(coalesce(p_title, ''));
+    IF v_clean_title = '' OR length(v_clean_title) > 200 THEN
+        RETURN jsonb_build_object('success', false, 'code', 'INVALID_TITLE', 'message', 'Geçersiz sesli plan başlığı.');
+    END IF;
 
-    IF coalesce(v_is_premium, false) = false AND v_voice_usage >= 3 THEN
+    IF p_duration_minutes < 15 OR p_duration_minutes > 480 THEN
+        RETURN jsonb_build_object('success', false, 'code', 'INVALID_DURATION', 'message', 'Süre 15-480 dakika arasında olmalıdır.');
+    END IF;
+
+    IF p_day_index < 0 OR p_day_index > 6 THEN
+        RETURN jsonb_build_object('success', false, 'code', 'INVALID_DAY_INDEX', 'message', 'Gün indeksi 0 ile 6 arasında olmalıdır.');
+    END IF;
+
+    IF p_task_mode NOT IN ('student', 'pro') THEN
+        RETURN jsonb_build_object('success', false, 'code', 'INVALID_TASK_MODE', 'message', 'Mod yalnızca student veya pro olabilir.');
+    END IF;
+
+    IF p_priority NOT IN ('Düşük', 'Orta', 'Yüksek', 'Kritik') THEN
+        RETURN jsonb_build_object('success', false, 'code', 'INVALID_PRIORITY', 'message', 'Geçersiz öncelik seviyesi.');
+    END IF;
+
+    IF p_task_time !~ '^([01][0-9]|2[0-3]):[0-5][0-9]$' THEN
+        RETURN jsonb_build_object('success', false, 'code', 'INVALID_TASK_TIME', 'message', 'Saat formatı HH:mm olmalıdır.');
+    END IF;
+
+    IF p_deadline IS NOT NULL THEN
+        BEGIN
+            v_task_start := (p_scheduled_date || ' ' || p_task_time || ':00')::timestamptz;
+            v_task_end := v_task_start + (p_duration_minutes || ' minutes')::interval;
+            IF v_task_end > p_deadline THEN
+                RETURN jsonb_build_object('success', false, 'code', 'DEADLINE_EXCEEDED', 'message', 'Görev bitiş saati teslim tarihini geçemez.');
+            END IF;
+        EXCEPTION WHEN OTHERS THEN
+            RETURN jsonb_build_object('success', false, 'code', 'INVALID_DATE_FORMAT', 'message', 'Geçersiz tarih formatı.');
+        END;
+    END IF;
+
+    SELECT * INTO v_profile
+    FROM public.profiles
+    WHERE id = v_user_id
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        INSERT INTO public.profiles (id, email)
+        VALUES (v_user_id, auth.jwt()->>'email')
+        RETURNING * INTO v_profile;
+    END IF;
+
+    IF coalesce(v_profile.is_premium, false) = false AND coalesce(v_profile.voice_command_usage, 0) >= 3 THEN
         RETURN jsonb_build_object(
             'success', false,
             'code', 'QUOTA_EXCEEDED',
@@ -653,29 +721,14 @@ BEGIN
         );
     END IF;
 
-    v_clean_title := trim(coalesce(p_title, ''));
-    IF v_clean_title = '' THEN v_clean_title := 'Sesli Plan'; END IF;
-
-    v_duration := coalesce(p_duration_minutes, 60);
-    IF v_duration < 15 OR v_duration > 480 THEN v_duration := 60; END IF;
-
-    v_day_idx := coalesce(p_day_index, 0);
-    IF v_day_idx < 0 OR v_day_idx > 6 THEN v_day_idx := 0; END IF;
-
-    v_mode := CASE WHEN p_task_mode = 'pro' THEN 'pro' ELSE 'student' END;
-    v_priority := CASE WHEN p_priority IN ('Düşük', 'Orta', 'Yüksek', 'Kritik') THEN p_priority ELSE 'Orta' END;
-    
-    v_task_time := coalesce(p_task_time, '10:00');
-    IF v_task_time !~ '^([01][0-9]|2[0-3]):[0-5][0-9]$' THEN v_task_time := '10:00'; END IF;
-
     INSERT INTO public.weekly_tasks (
         user_id, title, category, day_index, scheduled_date, week_start_date,
         task_mode, task_time, duration_minutes, priority, deadline, reminder_time,
         is_completed, version, sync_status
     ) VALUES (
-        v_user_id, v_clean_title, coalesce(p_category, 'Sesli Plan'), v_day_idx,
-        p_scheduled_date::date, p_week_start_date::date, v_mode, v_task_time,
-        v_duration, v_priority, p_deadline, coalesce(p_reminder_time, '1 Saat Önce'),
+        v_user_id, v_clean_title, coalesce(p_category, 'Sesli Plan'), p_day_index,
+        p_scheduled_date::date, p_week_start_date::date, p_task_mode, p_task_time,
+        p_duration_minutes, p_priority, p_deadline, coalesce(p_reminder_time, '1 Saat Önce'),
         false, 1, 'pending'
     ) RETURNING * INTO v_new_task;
 
@@ -694,15 +747,46 @@ BEGIN
         1, 'pending'
     ) ON CONFLICT (user_id, idempotency_key) DO NOTHING;
 
-    IF coalesce(v_is_premium, false) = false THEN
-        UPDATE public.profiles SET voice_command_usage = v_voice_usage + 1 WHERE id = v_user_id;
+    IF coalesce(v_profile.is_premium, false) = false THEN
+        UPDATE public.profiles
+        SET voice_command_usage = coalesce(v_profile.voice_command_usage, 0) + 1,
+            updated_at = now()
+        WHERE id = v_user_id;
     END IF;
 
     RETURN jsonb_build_object('success', true, 'task', to_jsonb(v_new_task));
 END;
 $$;
 
--- 11. RPC: delete_user_account
+CREATE OR REPLACE FUNCTION public.get_all_user_calendar_events()
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, extensions, pg_temp
+AS $$
+DECLARE
+    v_user_id uuid;
+    v_events jsonb;
+BEGIN
+    v_user_id := auth.uid();
+    IF v_user_id IS NULL THEN
+        RETURN '[]'::jsonb;
+    END IF;
+
+    SELECT coalesce(jsonb_agg(jsonb_build_object(
+        'calendar_id', calendar_id,
+        'calendar_event_id', calendar_event_id
+    )), '[]'::jsonb)
+    INTO v_events
+    FROM public.weekly_tasks
+    WHERE user_id = v_user_id 
+      AND calendar_id IS NOT NULL 
+      AND calendar_event_id IS NOT NULL;
+
+    RETURN v_events;
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION public.delete_user_account()
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -726,16 +810,16 @@ BEGIN
 END;
 $$;
 
--- 12. GRANTS
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.sync_my_profile_status() TO authenticated;
 GRANT EXECUTE ON FUNCTION public.consume_ai_quota(text) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.refund_ai_quota(text) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.cancel_my_subscription() TO authenticated;
 GRANT EXECUTE ON FUNCTION public.create_task_with_outbox(text, text, integer, text, text, text, integer, text, timestamptz, text, text, text) TO authenticated;
-GRANT EXECUTE ON FUNCTION public.save_task_mutation(uuid, text, text, integer, text, text, text, integer, text, timestamptz, text, boolean, integer, text) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.save_task_mutation(uuid, text, text, integer, text, text, text, integer, text, integer, timestamptz, text, boolean, text) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.claim_pending_delete_operations(integer, integer) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.report_delete_side_effects(uuid, text, text, text, text, text) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.delete_task_durable(uuid) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.create_voice_task_with_quota(text, text, text, integer, text, text, text, text, integer, text, timestamptz, text) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.get_all_user_calendar_events() TO authenticated;
 GRANT EXECUTE ON FUNCTION public.delete_user_account() TO authenticated;
