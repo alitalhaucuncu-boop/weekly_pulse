@@ -1591,6 +1591,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
 
     showDialog(
       context: context,
+      barrierDismissible: true,
       builder: (dialogContext) {
         return StatefulBuilder(
           builder: (context, setStateDialog) {
@@ -1623,7 +1624,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
 
             void stopListening() {
               try {
-                _speechToText.stop();
+                if (_isListening) {
+                  _speechToText.stop();
+                }
               } catch (_) {}
               if (dialogContext.mounted) {
                 setStateDialog(() => _isListening = false);
@@ -1793,7 +1796,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                             if (response is! Map ||
                                 response['success'] != true) {
                               if (dialogContext.mounted) {
-                                dialogNav.pop();
+                                Navigator.pop(dialogContext);
                               }
                               if (!mounted) return;
                               final message = (response is Map)
@@ -1863,7 +1866,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
       },
     ).whenComplete(() {
       try {
-        _speechToText.stop();
+        if (_isListening) {
+          _speechToText.stop();
+        }
       } catch (_) {}
       speechController.dispose();
     });
@@ -2862,11 +2867,6 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                 Navigator.pop(dialogContext);
                 final scaffoldMessenger = ScaffoldMessenger.of(context);
 
-                setState(() {
-                  allFetchedTasks.removeWhere((t) => t.id == task.id);
-                  allMonthFetchedTasks.removeWhere((t) => t.id == task.id);
-                });
-
                 bool dbDeleteSuccess = false;
                 try {
                   final res = await supabase.rpc(
@@ -2876,18 +2876,24 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
 
                   if (res is Map && res['success'] == true) {
                     dbDeleteSuccess = true;
+                    if (mounted) {
+                      setState(() {
+                        allFetchedTasks.removeWhere((t) => t.id == task.id);
+                        allMonthFetchedTasks
+                            .removeWhere((t) => t.id == task.id);
+                      });
+                    }
                   } else {
-                    throw Exception((res is Map)
-                        ? res['message']
-                        : 'Silme işlemi başarısız.');
+                    final err = (res is Map) ? res['message'] : null;
+                    throw Exception(err ?? 'Silme işlemi başarısız.');
                   }
                 } catch (e) {
                   debugPrint("Veritabanı Silme Hatası: $e");
                   if (mounted) {
                     scaffoldMessenger.showSnackBar(
-                      const SnackBar(
-                          content:
-                              Text('Silme işlemi veritabanına yansıtılamadı.')),
+                      SnackBar(
+                          content: Text(
+                              'Silme işlemi veritabanına yansıtılamadı: $e')),
                     );
                   }
                   _fetchTasks();
@@ -2908,13 +2914,6 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                     }
                   } catch (e) {
                     debugPrint("İstemci Temizleme Hatası: $e");
-                    if (mounted) {
-                      scaffoldMessenger.showSnackBar(
-                        const SnackBar(
-                            content: Text(
-                                '⚠️ Görev silindi fakat bildirim/takvim temizlenemedi.')),
-                      );
-                    }
                   }
                 }
               },

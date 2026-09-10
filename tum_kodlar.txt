@@ -3266,6 +3266,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
 
     showDialog(
       context: context,
+      barrierDismissible: true,
       builder: (dialogContext) {
         return StatefulBuilder(
           builder: (context, setStateDialog) {
@@ -3298,7 +3299,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
 
             void stopListening() {
               try {
-                _speechToText.stop();
+                if (_isListening) {
+                  _speechToText.stop();
+                }
               } catch (_) {}
               if (dialogContext.mounted) {
                 setStateDialog(() => _isListening = false);
@@ -3468,7 +3471,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                             if (response is! Map ||
                                 response['success'] != true) {
                               if (dialogContext.mounted) {
-                                dialogNav.pop();
+                                Navigator.pop(dialogContext);
                               }
                               if (!mounted) return;
                               final message = (response is Map)
@@ -3538,7 +3541,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
       },
     ).whenComplete(() {
       try {
-        _speechToText.stop();
+        if (_isListening) {
+          _speechToText.stop();
+        }
       } catch (_) {}
       speechController.dispose();
     });
@@ -4249,13 +4254,12 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                       TaskItem.fromJson(rpcRes['task']);
 
                                   if (modalContext.mounted) {
-                                    Navigator.pop(modalContext);
+                                    Navigator.of(modalContext).pop();
                                   }
 
                                   _fetchTasks();
                                   _fetchAllTasksForMonth(focusedCalendarDay);
 
-                                  // P1 FIX: Await edilerek tam senkronizasyon sonucu kullanıcıya gösterilir
                                   final syncResult = await TaskSyncCoordinator
                                       .coordinateTaskSync(
                                     task: createdTask,
@@ -4538,11 +4542,6 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                 Navigator.pop(dialogContext);
                 final scaffoldMessenger = ScaffoldMessenger.of(context);
 
-                setState(() {
-                  allFetchedTasks.removeWhere((t) => t.id == task.id);
-                  allMonthFetchedTasks.removeWhere((t) => t.id == task.id);
-                });
-
                 bool dbDeleteSuccess = false;
                 try {
                   final res = await supabase.rpc(
@@ -4552,18 +4551,24 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
 
                   if (res is Map && res['success'] == true) {
                     dbDeleteSuccess = true;
+                    if (mounted) {
+                      setState(() {
+                        allFetchedTasks.removeWhere((t) => t.id == task.id);
+                        allMonthFetchedTasks
+                            .removeWhere((t) => t.id == task.id);
+                      });
+                    }
                   } else {
-                    throw Exception((res is Map)
-                        ? res['message']
-                        : 'Silme işlemi başarısız.');
+                    final err = (res is Map) ? res['message'] : null;
+                    throw Exception(err ?? 'Silme işlemi başarısız.');
                   }
                 } catch (e) {
                   debugPrint("Veritabanı Silme Hatası: $e");
                   if (mounted) {
                     scaffoldMessenger.showSnackBar(
-                      const SnackBar(
-                          content:
-                              Text('Silme işlemi veritabanına yansıtılamadı.')),
+                      SnackBar(
+                          content: Text(
+                              'Silme işlemi veritabanına yansıtılamadı: $e')),
                     );
                   }
                   _fetchTasks();
@@ -4584,13 +4589,6 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                     }
                   } catch (e) {
                     debugPrint("İstemci Temizleme Hatası: $e");
-                    if (mounted) {
-                      scaffoldMessenger.showSnackBar(
-                        const SnackBar(
-                            content: Text(
-                                '⚠️ Görev silindi fakat bildirim/takvim temizlenemedi.')),
-                      );
-                    }
                   }
                 }
               },
@@ -4639,7 +4637,6 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
         } else {
           final targetDate =
               DateTime.tryParse(task.scheduledDate ?? '') ?? DateTime.now();
-          // P1 FIX: Await edilerek arka plan senkronizasyonu tamamlanır
           await TaskSyncCoordinator.coordinateTaskSync(
             task: task,
             targetDate: targetDate,
@@ -5717,7 +5714,9 @@ void main() {
           title: 'Görev 1',
           category: 'İş',
           dayIndex: 0,
+          scheduledDate: '2026-09-07',
           weekStartDate: '2026-09-07',
+          taskTime: '10:00',
           durationMinutes: 120,
           priority: 'Orta',
         ),
@@ -5727,7 +5726,9 @@ void main() {
           title: 'Görev 2',
           category: 'Ders',
           dayIndex: 0,
+          scheduledDate: '2026-09-07',
           weekStartDate: '2026-09-07',
+          taskTime: '13:00',
           durationMinutes: 60,
           priority: 'Kritik',
         ),
@@ -5738,12 +5739,15 @@ void main() {
     });
 
     test('Zaman çakışması doğru tespit edilmeli (Interval Overlap)', () {
+      final targetDate = DateTime(2026, 9, 8);
+
       final taskA = TaskItem(
         id: '1',
         userId: 'u1',
         title: 'Görev A',
         category: 'İş',
         dayIndex: 1,
+        scheduledDate: '2026-09-08',
         weekStartDate: '2026-09-07',
         taskTime: '10:00',
         durationMinutes: 60,
@@ -5755,6 +5759,7 @@ void main() {
         title: 'Görev B',
         category: 'İş',
         dayIndex: 1,
+        scheduledDate: '2026-09-08',
         weekStartDate: '2026-09-07',
         taskTime: '10:30',
         durationMinutes: 60,
@@ -5766,16 +5771,19 @@ void main() {
         title: 'Görev C',
         category: 'İş',
         dayIndex: 1,
+        scheduledDate: '2026-09-08',
         weekStartDate: '2026-09-07',
         taskTime: '11:00',
         durationMinutes: 60,
       );
 
-      final targetDate = DateTime(2026, 9, 8);
+      // 10:30 - 11:30 ile 10:00 - 11:00 çakışır
       expect(
         PlanningEngine.wouldConflictOnTargetDay(taskB, targetDate, [taskA]),
         isTrue,
       );
+
+      // 11:00 - 12:00 ile 10:00 - 11:00 çakışmaz (sınır temas)
       expect(
         PlanningEngine.wouldConflictOnTargetDay(taskC, targetDate, [taskA]),
         isFalse,
