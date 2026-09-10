@@ -15,7 +15,6 @@ import '../../application/planning_engine.dart';
 import '../../application/recovery_engine.dart';
 import '../../application/task_sync_coordinator.dart';
 import '../widgets/task_card.dart';
-import 'auth_screen.dart';
 
 enum ViewMode { daily, weekly, monthly }
 
@@ -31,9 +30,6 @@ class TaskMoveResult {
   bool get isBusy => status == TaskMoveStatus.busy;
   bool get isConflict => status == TaskMoveStatus.conflict;
 }
-
-Function(String taskId)? onGlobalNotificationFocus;
-String? globalPendingNotificationTaskId;
 
 class WeeklyPlannerScreen extends StatefulWidget {
   final bool isDark;
@@ -75,6 +71,8 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
 
   List<TaskItem> allFetchedTasks = [];
   List<TaskItem> allMonthFetchedTasks = [];
+  // WP-031 FIX: Aylık takvim için O(1) arama haritası
+  Map<String, List<TaskItem>> _monthTasksByDate = {};
 
   String _formatDateToKey(DateTime date) {
     return "${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}";
@@ -102,9 +100,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
 
   Future<bool> focusOnTaskById(String taskId) async {
     final user = supabase.auth.currentUser;
-    if (user == null) {
-      return false;
-    }
+    if (user == null) return false;
 
     TaskItem? targetTask = allFetchedTasks.firstWhere((t) => t.id == taskId,
         orElse: () => allMonthFetchedTasks.firstWhere((t) => t.id == taskId,
@@ -163,7 +159,8 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
     selectedDayIndex = now.weekday - 1;
     selectedCalendarDay = DateTime(now.year, now.month, now.day);
 
-    onGlobalNotificationFocus = (taskId) {
+    // WP-009 FIX: Bildirim tıklama olayını dinle
+    onGlobalNotificationPayloadReceived = (taskId) {
       if (mounted) {
         focusOnTaskById(taskId);
       }
@@ -185,20 +182,11 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
         );
       }
     });
-
-    WidgetsBinding.instance.addPostFrameCallback((_) async {
-      if (globalPendingNotificationTaskId != null) {
-        final success = await focusOnTaskById(globalPendingNotificationTaskId!);
-        if (success) {
-          globalPendingNotificationTaskId = null;
-        }
-      }
-    });
   }
 
   @override
   void dispose() {
-    onGlobalNotificationFocus = null;
+    onGlobalNotificationPayloadReceived = null;
     _confettiController.dispose();
     super.dispose();
   }
@@ -206,10 +194,19 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
   void _loadPreferences() async {
     final prefs = await SharedPreferences.getInstance();
     final savedMode = prefs.getString('active_mode');
-    if (savedMode != null && mounted) {
-      setState(() {
-        activeMode = savedMode;
-      });
+    // WP-019 FIX: Mod allowlist kontrolü
+    if (savedMode != null && (savedMode == 'student' || savedMode == 'pro')) {
+      if (mounted) {
+        setState(() {
+          activeMode = savedMode;
+        });
+      }
+    } else {
+      if (mounted) {
+        setState(() {
+          activeMode = 'student';
+        });
+      }
     }
   }
 
@@ -269,9 +266,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
     }
 
     if (busiestDay == -1 || maxScore < 60 || lightestDay == busiestDay) {
-      if (!mounted) {
-        return;
-      }
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('✨ Haftalık planın zaten dengeli görünüyor!'),
@@ -320,9 +315,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
     }
 
     if (candidateTask == null) {
-      if (!mounted) {
-        return;
-      }
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
             content: Text(
@@ -387,9 +380,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                 final scaffoldMessenger = ScaffoldMessenger.of(context);
                 Navigator.pop(dialogContext);
                 final result = await _moveTaskToNewDay(targetTask, lightestDay);
-                if (!mounted) {
-                  return;
-                }
+                if (!mounted) return;
 
                 if (result.isSuccess) {
                   _confettiController.play();
@@ -604,19 +595,8 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                       icon: const Icon(Icons.logout),
                       label: const Text('Hesaptan Çıkış Yap'),
                       onPressed: () async {
-                        final navigator = Navigator.of(context);
+                        Navigator.pop(modalContext);
                         await supabase.auth.signOut();
-                        if (!mounted) {
-                          return;
-                        }
-                        navigator.pushReplacement(
-                          MaterialPageRoute(
-                            builder: (_) => AuthScreen(
-                              onThemeToggle: widget.onThemeToggle,
-                              isDark: widget.isDark,
-                            ),
-                          ),
-                        );
                       },
                     ),
                   ),
@@ -698,7 +678,6 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                       ? null
                       : () async {
                           final messenger = ScaffoldMessenger.of(context);
-                          final nav = Navigator.of(context);
                           final dialogNav = Navigator.of(dialogContext);
 
                           final pwd = passwordController.text;
@@ -738,12 +717,19 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                           }
 
                           try {
+                            // WP-012 FIX: Kullanıcının geçmiş/gelecek tüm takvim event'lerini çekip sil
                             try {
-                              for (var t in allFetchedTasks) {
-                                if (t.calendarId != null &&
-                                    t.calendarEventId != null) {
-                                  await CalendarService.deleteEvent(
-                                      t.calendarId!, t.calendarEventId!);
+                              final dynamic calEventsRes = await supabase
+                                  .rpc('get_all_user_calendar_events');
+                              if (calEventsRes is List) {
+                                for (var ev in calEventsRes) {
+                                  final cid = ev['calendar_id']?.toString();
+                                  final ceid =
+                                      ev['calendar_event_id']?.toString();
+                                  if (cid != null && ceid != null) {
+                                    await CalendarService.deleteEvent(
+                                        cid, ceid);
+                                  }
                                 }
                               }
                             } catch (_) {}
@@ -763,18 +749,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                               } catch (_) {}
 
                               await supabase.auth.signOut();
-                              if (!mounted) return;
                               if (dialogContext.mounted) {
                                 dialogNav.pop();
                               }
-                              nav.pushReplacement(
-                                MaterialPageRoute(
-                                  builder: (_) => AuthScreen(
-                                    onThemeToggle: widget.onThemeToggle,
-                                    isDark: widget.isDark,
-                                  ),
-                                ),
-                              );
                               messenger.showSnackBar(
                                 const SnackBar(
                                     content: Text(
@@ -912,9 +889,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
     try {
       final dynamic quotaRes = await supabase.rpc(
         'consume_ai_quota',
-        params: {
-          'p_request_id': requestId,
-        },
+        params: {'p_request_id': requestId},
       );
 
       if (quotaRes is! Map || quotaRes['success'] != true) {
@@ -1197,13 +1172,51 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
     );
   }
 
+  void _showPricingModal() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+      builder: (modalContext) {
+        return Container(
+          padding: const EdgeInsets.all(24),
+          height: MediaQuery.of(context).size.height * 0.85,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Center(
+                  child: Text('WeeklyPulse Elit Kulüp 👑',
+                      style: TextStyle(
+                          fontSize: 22, fontWeight: FontWeight.bold))),
+              const SizedBox(height: 20),
+              _buildPricingCard(
+                title: '🎓 SCHOLAR (Öğrenci Kulübü)',
+                monthlyPrice: '99.99 TL / ay',
+                yearlyPrice: '999.99 TL / yıl (2 Ay Bedava)',
+                tierCode: 'Scholar 🎓',
+                color: const Color(0xFF4A55A2),
+              ),
+              const SizedBox(height: 12),
+              _buildPricingCard(
+                title: '💼 EXECUTIVE (İş Kulübü)',
+                monthlyPrice: '99.99 TL / ay',
+                yearlyPrice: '999.99 TL / yıl (2 Ay Bedava)',
+                tierCode: 'Executive 👑',
+                color: const Color(0xFF1E293B),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
   Widget _buildPricingCard({
     required String title,
     required String monthlyPrice,
     required String yearlyPrice,
     required String tierCode,
-    required String monthlyPlanId,
-    required String yearlyPlanId,
     required Color color,
   }) {
     return Container(
@@ -1229,8 +1242,16 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
               ElevatedButton(
                 style: ElevatedButton.styleFrom(
                     backgroundColor: color, minimumSize: const Size(80, 30)),
-                onPressed: () =>
-                    _handleStorePurchase(tierCode, monthlyPlanId, false),
+                onPressed: () {
+                  Navigator.pop(context);
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text(
+                          '👑 $tierCode üyeliği mağaza sürümünde aktif edilecektir.'),
+                      backgroundColor: const Color(0xFF7895CB),
+                    ),
+                  );
+                },
                 child: const Text('Katıl (Demo)',
                     style: TextStyle(color: Colors.white, fontSize: 11)),
               )
@@ -1249,70 +1270,22 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                 style: ElevatedButton.styleFrom(
                     backgroundColor: Colors.green,
                     minimumSize: const Size(80, 30)),
-                onPressed: () =>
-                    _handleStorePurchase(tierCode, yearlyPlanId, true),
+                onPressed: () {
+                  Navigator.pop(context);
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text(
+                          '👑 $tierCode üyeliği mağaza sürümünde aktif edilecektir.'),
+                      backgroundColor: const Color(0xFF7895CB),
+                    ),
+                  );
+                },
                 child: const Text('Yıllık (Demo)',
                     style: TextStyle(color: Colors.white, fontSize: 11)),
               )
             ],
           ),
         ],
-      ),
-    );
-  }
-
-  void _showPricingModal() {
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
-      builder: (modalContext) {
-        return Container(
-          padding: const EdgeInsets.all(24),
-          height: MediaQuery.of(context).size.height * 0.85,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Center(
-                  child: Text('WeeklyPulse Elit Kulüp 👑',
-                      style: TextStyle(
-                          fontSize: 22, fontWeight: FontWeight.bold))),
-              const SizedBox(height: 20),
-              _buildPricingCard(
-                title: '🎓 SCHOLAR (Öğrenci Kulübü)',
-                monthlyPrice: '99.99 TL / ay',
-                yearlyPrice: '999.99 TL / yıl (2 Ay Bedava)',
-                tierCode: 'Scholar 🎓',
-                monthlyPlanId: 'scholar_monthly',
-                yearlyPlanId: 'scholar_yearly',
-                color: const Color(0xFF4A55A2),
-              ),
-              const SizedBox(height: 12),
-              _buildPricingCard(
-                title: '💼 EXECUTIVE (İş Kulübü)',
-                monthlyPrice: '99.99 TL / ay',
-                yearlyPrice: '999.99 TL / yıl (2 Ay Bedava)',
-                tierCode: 'Executive 👑',
-                monthlyPlanId: 'executive_monthly',
-                yearlyPlanId: 'executive_yearly',
-                color: const Color(0xFF1E293B),
-              ),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  void _handleStorePurchase(String tierName, String planId, bool isYearly) {
-    if (!mounted) return;
-    Navigator.pop(context);
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content:
-            Text('👑 $tierName üyeliği mağaza sürümünde aktif edilecektir.'),
-        backgroundColor: const Color(0xFF7895CB),
       ),
     );
   }
@@ -1343,9 +1316,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
 
     if (targetWeekday != -1) {
       int diff = targetWeekday - todayMidnight.weekday;
-      if (diff <= 0) {
-        diff += 7;
-      }
+      if (diff <= 0) diff += 7;
       targetDate = todayMidnight.add(Duration(days: diff));
     } else if (RegExp(r'\byarın\b').hasMatch(lower)) {
       targetDate = todayMidnight.add(const Duration(days: 1));
@@ -1644,6 +1615,25 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                       ),
                     ),
                     const SizedBox(height: 12),
+                    // WP-034: Gün değiştirme seçeneği
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Text('Planlanan Gün:',
+                            style: TextStyle(fontWeight: FontWeight.bold)),
+                        DropdownButton<int>(
+                          value: targetDay,
+                          items: List.generate(
+                              7,
+                              (idx) => DropdownMenuItem(
+                                  value: idx, child: Text(fullWeekDays[idx]))),
+                          onChanged: (v) {
+                            if (v != null) setStateModal(() => targetDay = v);
+                          },
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
@@ -1743,11 +1733,10 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                     now.add(const Duration(days: 730));
 
                                 DateTime initialDate = selectedDeadline ?? now;
-                                if (initialDate.isBefore(firstDate)) {
+                                if (initialDate.isBefore(firstDate))
                                   initialDate = firstDate;
-                                } else if (initialDate.isAfter(lastDate)) {
+                                if (initialDate.isAfter(lastDate))
                                   initialDate = lastDate;
-                                }
 
                                 final DateTime? pickedDate =
                                     await showDatePicker(
@@ -1757,10 +1746,8 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                   lastDate: lastDate,
                                 );
 
-                                if (pickedDate == null ||
-                                    !modalContext.mounted) {
+                                if (pickedDate == null || !modalContext.mounted)
                                   return;
-                                }
 
                                 final TimeOfDay? pickedTime =
                                     await showTimePicker(
@@ -1816,9 +1803,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                             ? null
                             : () async {
                                 final newTitle = titleController.text.trim();
-                                if (newTitle.isEmpty) {
-                                  return;
-                                }
+                                if (newTitle.isEmpty) return;
 
                                 final newDate = currentWeekMonday
                                     .add(Duration(days: targetDay));
@@ -1855,6 +1840,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                 final derivedDayIndex = newDate.weekday - 1;
 
                                 try {
+                                  // WP-014 FIX: p_expected_version zorunlu kılındı
                                   final res = await supabase.rpc(
                                     'save_task_mutation',
                                     params: {
@@ -1869,11 +1855,11 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                       'p_task_time': formattedTime,
                                       'p_duration_minutes': selectedDuration,
                                       'p_priority': selectedPriority,
+                                      'p_expected_version': task.version,
                                       'p_deadline':
                                           selectedDeadline?.toIso8601String(),
                                       'p_reminder_time': selectedReminder,
                                       'p_is_completed': task.isCompleted,
-                                      'p_expected_version': task.version,
                                       'p_request_id':
                                           'mutation_${task.id}_${task.version + 1}',
                                     },
@@ -1905,9 +1891,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                       targetDate: newDate,
                                     );
 
-                                    if (!mounted) {
-                                      return;
-                                    }
+                                    if (!mounted) return;
 
                                     _fetchTasks();
                                     _fetchAllTasksForMonth(focusedCalendarDay);
@@ -1926,9 +1910,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                     final errCode =
                                         (res is Map) ? res['code'] : null;
                                     if (errCode == 'VERSION_CONFLICT') {
-                                      if (modalContext.mounted) {
-                                        modalNav.pop();
-                                      }
+                                      if (modalContext.mounted) modalNav.pop();
                                       scaffoldMessenger.showSnackBar(
                                         const SnackBar(
                                           content: Text(
@@ -1939,10 +1921,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                       _fetchTasks();
                                       return;
                                     }
-                                    final errMsg = (res is Map)
+                                    throw Exception(res is Map
                                         ? res['message']
-                                        : 'Güncelleme sunucu tarafından reddedildi.';
-                                    throw Exception(errMsg);
+                                        : 'Güncelleme sunucu tarafından reddedildi.');
                                   }
                                 } catch (e) {
                                   debugPrint("Görev Güncelleme Hatası: $e");
@@ -1950,9 +1931,8 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                     setStateModal(() => isEditSaving = false);
                                     scaffoldMessenger.showSnackBar(
                                       SnackBar(
-                                        content: Text('Hata: $e'),
-                                        backgroundColor: Colors.redAccent,
-                                      ),
+                                          content: Text('Hata: $e'),
+                                          backgroundColor: Colors.redAccent),
                                     );
                                   }
                                 }
@@ -2146,11 +2126,10 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                     now.add(const Duration(days: 730));
 
                                 DateTime initialDate = selectedDeadline ?? now;
-                                if (initialDate.isBefore(firstDate)) {
+                                if (initialDate.isBefore(firstDate))
                                   initialDate = firstDate;
-                                } else if (initialDate.isAfter(lastDate)) {
+                                if (initialDate.isAfter(lastDate))
                                   initialDate = lastDate;
-                                }
 
                                 final DateTime? pickedDate =
                                     await showDatePicker(
@@ -2160,10 +2139,8 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                   lastDate: lastDate,
                                 );
 
-                                if (pickedDate == null ||
-                                    !modalContext.mounted) {
+                                if (pickedDate == null || !modalContext.mounted)
                                   return;
-                                }
 
                                 final TimeOfDay? pickedTime =
                                     await showTimePicker(
@@ -2280,10 +2257,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                   if (rpcRes is! Map ||
                                       rpcRes['success'] != true ||
                                       rpcRes['task'] == null) {
-                                    final err = (rpcRes is Map)
+                                    throw Exception(rpcRes is Map
                                         ? rpcRes['message']
-                                        : 'Sunucu geçersiz yanıt verdi.';
-                                    throw Exception(err ?? 'Kayıt başarısız.');
+                                        : 'Kayıt başarısız.');
                                   }
 
                                   final TaskItem createdTask =
@@ -2307,10 +2283,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                       ScaffoldMessenger.of(context)
                                           .showSnackBar(
                                         const SnackBar(
-                                          content: Text(
-                                              '✨ Görev eklendi ve eşitlendi!'),
-                                          backgroundColor: Colors.green,
-                                        ),
+                                            content: Text(
+                                                '✨ Görev eklendi ve eşitlendi!'),
+                                            backgroundColor: Colors.green),
                                       );
                                     } else {
                                       final msg =
@@ -2319,10 +2294,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                       ScaffoldMessenger.of(context)
                                           .showSnackBar(
                                         SnackBar(
-                                          content:
-                                              Text('⚠️ Görev eklendi: $msg'),
-                                          backgroundColor: Colors.orange,
-                                        ),
+                                            content:
+                                                Text('⚠️ Görev eklendi: $msg'),
+                                            backgroundColor: Colors.orange),
                                       );
                                     }
                                   }
@@ -2369,9 +2343,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
     });
     try {
       final user = supabase.auth.currentUser;
-      if (user == null) {
-        return;
-      }
+      if (user == null) return;
 
       final response = await supabase
           .from('weekly_tasks')
@@ -2381,9 +2353,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
           .order('scheduled_date', ascending: true)
           .order('task_time', ascending: true);
 
-      if (generation != _fetchGeneration) {
-        return;
-      }
+      if (generation != _fetchGeneration) return;
 
       List<TaskItem> loaded = [];
       for (var row in response) {
@@ -2415,9 +2385,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
     final int gen = ++_monthFetchGeneration;
     try {
       final user = supabase.auth.currentUser;
-      if (user == null) {
-        return;
-      }
+      if (user == null) return;
 
       final firstDay = DateTime(monthDate.year, monthDate.month - 1, 20);
       final lastDay = DateTime(monthDate.year, monthDate.month + 1, 10);
@@ -2434,12 +2402,20 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
       if (gen != _monthFetchGeneration) return;
 
       List<TaskItem> loaded = [];
+      Map<String, List<TaskItem>> grouped = {};
       for (var row in response) {
-        loaded.add(TaskItem.fromJson(row));
+        final t = TaskItem.fromJson(row);
+        loaded.add(t);
+        if (t.scheduledDate != null) {
+          grouped.putIfAbsent(t.scheduledDate!, () => []).add(t);
+        }
       }
 
       if (mounted) {
-        setState(() => allMonthFetchedTasks = loaded);
+        setState(() {
+          allMonthFetchedTasks = loaded;
+          _monthTasksByDate = grouped;
+        });
       }
     } catch (e) {
       debugPrint("Ay Görevleri Çekme Hatası: $e");
@@ -2478,10 +2454,10 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
           'p_task_time': task.taskTime,
           'p_duration_minutes': task.durationMinutes,
           'p_priority': task.priority,
+          'p_expected_version': task.version,
           'p_deadline': task.deadline?.toIso8601String(),
           'p_reminder_time': task.reminderTime,
           'p_is_completed': task.isCompleted,
-          'p_expected_version': task.version,
           'p_request_id': 'move_${task.id}_${task.version + 1}',
         },
       );
@@ -2491,14 +2467,12 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
         _movingTaskIds.remove(task.id);
         if (code == 'VERSION_CONFLICT') {
           return const TaskMoveResult(
-            status: TaskMoveStatus.conflict,
-            message: 'Görev başka bir cihazda değiştirilmiş.',
-          );
+              status: TaskMoveStatus.conflict,
+              message: 'Görev başka bir cihazda değiştirilmiş.');
         }
         return const TaskMoveResult(
-          status: TaskMoveStatus.failed,
-          message: 'Görev veritabanında güncellenemedi.',
-        );
+            status: TaskMoveStatus.failed,
+            message: 'Görev veritabanında güncellenemedi.');
       }
 
       setState(() {
@@ -2590,8 +2564,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                       });
                     }
                   } else {
-                    final err = (res is Map) ? res['message'] : null;
-                    throw Exception(err ?? 'Silme işlemi başarısız.');
+                    throw Exception(res is Map
+                        ? res['message']
+                        : 'Silme işlemi başarısız.');
                   }
                 } catch (e) {
                   debugPrint("Veritabanı Silme Hatası: $e");
@@ -2651,10 +2626,10 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
           'p_task_time': task.taskTime,
           'p_duration_minutes': task.durationMinutes,
           'p_priority': task.priority,
+          'p_expected_version': task.version,
           'p_deadline': task.deadline?.toIso8601String(),
           'p_reminder_time': task.reminderTime,
           'p_is_completed': isCompleted,
-          'p_expected_version': task.version,
           'p_request_id': 'complete_${task.id}_${task.version + 1}',
         },
       );
@@ -2665,14 +2640,13 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
         final notifId = NotificationService.resolveNotificationId(task: task);
         if (isCompleted) {
           await NotificationService.cancelNotification(notifId);
-        } else {
-          final targetDate =
-              DateTime.tryParse(task.scheduledDate ?? '') ?? DateTime.now();
-          await TaskSyncCoordinator.coordinateTaskSync(
-            task: task,
-            targetDate: targetDate,
-          );
         }
+        final targetDate =
+            DateTime.tryParse(task.scheduledDate ?? '') ?? DateTime.now();
+        await TaskSyncCoordinator.coordinateTaskSync(
+          task: task,
+          targetDate: targetDate,
+        );
       } else {
         final code = (res is Map) ? res['code'] : null;
         if (code == 'VERSION_CONFLICT') {
@@ -2815,11 +2789,10 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                         const Icon(Icons.wifi_off,
                             size: 48, color: Colors.grey),
                         const SizedBox(height: 12),
-                        Text(
-                          _taskFetchError!,
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(fontWeight: FontWeight.bold),
-                        ),
+                        Text(_taskFetchError!,
+                            textAlign: TextAlign.center,
+                            style:
+                                const TextStyle(fontWeight: FontWeight.bold)),
                         const SizedBox(height: 16),
                         ElevatedButton.icon(
                           onPressed: _fetchTasks,
@@ -2856,16 +2829,13 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                   borderRadius: BorderRadius.circular(12),
                                 ),
                                 child: Center(
-                                  child: Text(
-                                    '🎓 Öğrenci Modu',
-                                    style: TextStyle(
-                                      color: isStudent
-                                          ? Colors.white
-                                          : Colors.grey,
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 12,
-                                    ),
-                                  ),
+                                  child: Text('🎓 Öğrenci Modu',
+                                      style: TextStyle(
+                                          color: isStudent
+                                              ? Colors.white
+                                              : Colors.grey,
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 12)),
                                 ),
                               ),
                             ),
@@ -2884,16 +2854,13 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                   borderRadius: BorderRadius.circular(12),
                                 ),
                                 child: Center(
-                                  child: Text(
-                                    '💼 Pro / İş Modu',
-                                    style: TextStyle(
-                                      color: !isStudent
-                                          ? Colors.white
-                                          : Colors.grey,
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 12,
-                                    ),
-                                  ),
+                                  child: Text('💼 Pro / İş Modu',
+                                      style: TextStyle(
+                                          color: !isStudent
+                                              ? Colors.white
+                                              : Colors.grey,
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 12)),
                                 ),
                               ),
                             ),
@@ -3139,27 +3106,24 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                     if (result.isBusy) {
                       scaffoldMessenger.showSnackBar(
                         const SnackBar(
-                          content:
-                              Text('⏳ Görev taşıma işlemi zaten devam ediyor.'),
-                          backgroundColor: Colors.blueGrey,
-                        ),
+                            content: Text(
+                                '⏳ Görev taşıma işlemi zaten devam ediyor.'),
+                            backgroundColor: Colors.blueGrey),
                       );
                     } else if (result.isConflict) {
                       scaffoldMessenger.showSnackBar(
                         const SnackBar(
-                          content: Text(
-                              '⚠️ Bu görev başka bir cihazda değiştirilmiş.'),
-                          backgroundColor: Colors.redAccent,
-                        ),
+                            content: Text(
+                                '⚠️ Bu görev başka bir cihazda değiştirilmiş.'),
+                            backgroundColor: Colors.redAccent),
                       );
                       _fetchTasks();
                     } else if (!result.isSuccess) {
                       scaffoldMessenger.showSnackBar(
                         SnackBar(
-                          content: Text(result.message ??
-                              '⚠️ Görev taşındı fakat tam senkronize edilemedi.'),
-                          backgroundColor: Colors.orange,
-                        ),
+                            content: Text(result.message ??
+                                '⚠️ Görev taşındı fakat tam senkronize edilemedi.'),
+                            backgroundColor: Colors.orange),
                       );
                     }
                   },
@@ -3223,10 +3187,11 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
 
   Widget _buildMonthlyCalendarView(Color primaryColor) {
     final String selectedDateKey = _formatDateToKey(selectedCalendarDay);
-    final List<TaskItem> tasksForSelectedDay = allMonthFetchedTasks
-        .where((t) =>
-            t.taskMode == activeMode && t.scheduledDate == selectedDateKey)
-        .toList();
+    // WP-031 FIX: O(1) harita tabanlı arama
+    final List<TaskItem> tasksForSelectedDay =
+        (_monthTasksByDate[selectedDateKey] ?? [])
+            .where((t) => t.taskMode == activeMode)
+            .toList();
 
     return Column(
       children: [
@@ -3255,9 +3220,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
             ),
             calendarBuilders: CalendarBuilders(
               markerBuilder: (context, day, events) {
-                if (events.isEmpty) {
-                  return null;
-                }
+                if (events.isEmpty) return null;
                 return Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: events.take(4).map((event) {
@@ -3300,11 +3263,11 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
               });
               _fetchTasks();
             },
+            // WP-031 FIX: Her hücre için O(1) arama
             eventLoader: (day) {
               final dateStr = _formatDateToKey(day);
-              return allMonthFetchedTasks
-                  .where((t) =>
-                      t.taskMode == activeMode && t.scheduledDate == dateStr)
+              return (_monthTasksByDate[dateStr] ?? [])
+                  .where((t) => t.taskMode == activeMode)
                   .toList();
             },
           ),
@@ -3328,16 +3291,13 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                   final scaffoldMessenger = ScaffoldMessenger.of(context);
                   final res = await TaskSyncCoordinator.coordinateTaskSync(
                       task: task, targetDate: d);
-                  if (!mounted) {
-                    return;
-                  }
+                  if (!mounted) return;
                   _fetchTasks();
                   final syncMsg = res.isFullySynced
                       ? '✨ Görev eşitlendi!'
                       : '⚠️ Eşitleme kısmi: ${res.effectiveUserMessage ?? 'Senkronizasyon tamamlanamadı.'}';
-                  scaffoldMessenger.showSnackBar(
-                    SnackBar(content: Text(syncMsg)),
-                  );
+                  scaffoldMessenger
+                      .showSnackBar(SnackBar(content: Text(syncMsg)));
                 },
               );
             },
@@ -3410,48 +3370,38 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                       activeTasks: activeTasks,
                     );
 
-                    if (!mounted) {
-                      return;
-                    }
+                    if (!mounted) return;
                     _fetchTasks();
                     _fetchAllTasksForMonth(focusedCalendarDay);
 
                     List<String> outcomeParts = [];
-                    if (res.successCount > 0) {
+                    if (res.successCount > 0)
                       outcomeParts.add('${res.successCount} tam başarıyla');
-                    }
-                    if (res.partialSyncCount > 0) {
+                    if (res.partialSyncCount > 0)
                       outcomeParts
                           .add('${res.partialSyncCount} kısmi eşitlemeyle');
-                    }
-                    if (res.skippedConflictCount > 0) {
+                    if (res.skippedConflictCount > 0)
                       outcomeParts.add(
                           '${res.skippedConflictCount} çakışma nedeniyle atlandı');
-                    }
-                    if (res.skippedDeadlineCount > 0) {
+                    if (res.skippedDeadlineCount > 0)
                       outcomeParts
                           .add('${res.skippedDeadlineCount} deadline aşımı');
-                    }
-                    if (res.databaseUpdateFailedCount > 0) {
+                    if (res.databaseUpdateFailedCount > 0)
                       outcomeParts.add(
                           '${res.databaseUpdateFailedCount} veritabanı hatası');
-                    }
-                    if (res.databaseReadFailedCount > 0) {
+                    if (res.databaseReadFailedCount > 0)
                       outcomeParts
                           .add('${res.databaseReadFailedCount} okuma hatası');
-                    }
-                    if (res.syncFailedCount > 0) {
+                    if (res.syncFailedCount > 0)
                       outcomeParts
                           .add('${res.syncFailedCount} senkronizasyon hatası');
-                    }
 
                     final summaryText = outcomeParts.isEmpty
                         ? 'Kurtarılacak uygun plan bulunamadı.'
                         : '⚡ Plan Kurtarma Özeti: ${outcomeParts.join(", ")}.';
 
-                    scaffoldMessenger.showSnackBar(
-                      SnackBar(content: Text(summaryText)),
-                    );
+                    scaffoldMessenger
+                        .showSnackBar(SnackBar(content: Text(summaryText)));
                   },
                   child: const Text('Toparla ⚡',
                       style: TextStyle(
@@ -3529,16 +3479,13 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                     final scaffoldMessenger = ScaffoldMessenger.of(context);
                     final res = await TaskSyncCoordinator.coordinateTaskSync(
                         task: task, targetDate: d);
-                    if (!mounted) {
-                      return;
-                    }
+                    if (!mounted) return;
                     _fetchTasks();
                     final syncMsg = res.isFullySynced
                         ? '✨ Görev eşitlendi!'
                         : '⚠️ Eşitleme kısmi: ${res.effectiveUserMessage ?? 'Senkronizasyon tamamlanamadı.'}';
-                    scaffoldMessenger.showSnackBar(
-                      SnackBar(content: Text(syncMsg)),
-                    );
+                    scaffoldMessenger
+                        .showSnackBar(SnackBar(content: Text(syncMsg)));
                   },
                 ),
               );
@@ -3612,16 +3559,13 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                       final scaffoldMessenger = ScaffoldMessenger.of(context);
                       final res = await TaskSyncCoordinator.coordinateTaskSync(
                           task: task, targetDate: d);
-                      if (!mounted) {
-                        return;
-                      }
+                      if (!mounted) return;
                       _fetchTasks();
                       final syncMsg = res.isFullySynced
                           ? '✨ Görev eşitlendi!'
                           : '⚠️ Eşitleme kısmi: ${res.effectiveUserMessage ?? 'Senkronizasyon tamamlanamadı.'}';
-                      scaffoldMessenger.showSnackBar(
-                        SnackBar(content: Text(syncMsg)),
-                      );
+                      scaffoldMessenger
+                          .showSnackBar(SnackBar(content: Text(syncMsg)));
                     },
                   )),
             const Divider(height: 16),
@@ -3688,9 +3632,7 @@ class _VoiceInputBottomSheetState extends State<VoiceInputBottomSheet> {
         onError: (e) => debugPrint('STT Hata: $e'),
         onStatus: (s) => debugPrint('STT Durum: $s'),
       );
-      if (mounted) {
-        setState(() => _speechAvailable = available);
-      }
+      if (mounted) setState(() => _speechAvailable = available);
     } catch (_) {}
   }
 
@@ -3728,13 +3670,9 @@ class _VoiceInputBottomSheetState extends State<VoiceInputBottomSheet> {
 
   Future<void> _safeClose() async {
     try {
-      if (_speech.isListening) {
-        await _speech.stop();
-      }
+      if (_speech.isListening) await _speech.stop();
     } catch (_) {}
-    if (mounted) {
-      Navigator.of(context).pop();
-    }
+    if (mounted) Navigator.of(context).pop();
   }
 
   @override
@@ -3796,11 +3734,8 @@ class _VoiceInputBottomSheetState extends State<VoiceInputBottomSheet> {
                       _isListening ? Colors.redAccent : const Color(0xFF7895CB),
                   shape: BoxShape.circle,
                 ),
-                child: Icon(
-                  _isListening ? Icons.mic : Icons.mic_none,
-                  color: Colors.white,
-                  size: 36,
-                ),
+                child: Icon(_isListening ? Icons.mic : Icons.mic_none,
+                    color: Colors.white, size: 36),
               ),
             ),
             const SizedBox(height: 16),

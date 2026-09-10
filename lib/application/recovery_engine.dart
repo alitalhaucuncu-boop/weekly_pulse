@@ -133,10 +133,10 @@ class RecoveryEngine {
             'p_task_time': "${currentHour.toString().padLeft(2, '0')}:00",
             'p_duration_minutes': task.durationMinutes,
             'p_priority': task.priority,
+            'p_expected_version': expectedVer,
             'p_deadline': task.deadline?.toIso8601String(),
             'p_reminder_time': task.reminderTime,
             'p_is_completed': false,
-            'p_expected_version': expectedVer,
             'p_request_id':
                 'recovery_${task.id}_${DateTime.now().millisecondsSinceEpoch}',
           },
@@ -159,7 +159,11 @@ class RecoveryEngine {
           if (syncRes.isFullySynced) {
             success++;
           } else {
+            // WP-018 FIX: Senkronizasyon kısmi veya başarısızsa sayacı doğru güncelle
             partialSync++;
+            if (!syncRes.isCalendarSynced) {
+              syncFail++;
+            }
           }
 
           currentHour = (currentHour + (task.durationMinutes ~/ 60) + 1);

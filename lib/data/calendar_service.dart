@@ -1,119 +1,115 @@
-import 'package:device_calendar/device_calendar.dart';
 import 'package:flutter/foundation.dart';
+import 'package:device_calendar/device_calendar.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:timezone/timezone.dart' as tz;
-import '../domain/models/task_item.dart';
 
 class CalendarService {
-  static final DeviceCalendarPlugin _deviceCalendarPlugin =
-      DeviceCalendarPlugin();
-  static const String _prefCalendarKey = 'selected_calendar_id';
+  static final DeviceCalendarPlugin _plugin = DeviceCalendarPlugin();
 
   static Future<bool> requestPermissions() async {
-    var permissionsGranted = await _deviceCalendarPlugin.hasPermissions();
-    if (permissionsGranted.isSuccess && !permissionsGranted.data!) {
-      permissionsGranted = await _deviceCalendarPlugin.requestPermissions();
+    try {
+      var permissionsGranted = await _plugin.hasPermissions();
+      if (permissionsGranted.isSuccess && !permissionsGranted.data!) {
+        permissionsGranted = await _plugin.requestPermissions();
+        return permissionsGranted.isSuccess && permissionsGranted.data!;
+      }
       return permissionsGranted.isSuccess && permissionsGranted.data!;
+    } catch (e) {
+      debugPrint("Takvim izin hatası: $e");
+      return false;
     }
-    return permissionsGranted.isSuccess && permissionsGranted.data!;
-  }
-
-  static Future<List<Calendar>> getWritableCalendars() async {
-    final hasPermission = await requestPermissions();
-    if (!hasPermission) return [];
-
-    final calendarsResult = await _deviceCalendarPlugin.retrieveCalendars();
-    if (calendarsResult.isSuccess && calendarsResult.data != null) {
-      return calendarsResult.data!.where((c) => c.isReadOnly == false).toList();
-    }
-    return [];
-  }
-
-  static Future<void> setSelectedCalendarId(String calendarId) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_prefCalendarKey, calendarId);
   }
 
   static Future<String?> getDefaultCalendarId() async {
-    final prefs = await SharedPreferences.getInstance();
-    final savedId = prefs.getString(_prefCalendarKey);
-    if (savedId != null && savedId.isNotEmpty) {
-      return savedId;
-    }
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final savedId = prefs.getString('default_calendar_id');
 
-    final writable = await getWritableCalendars();
-    if (writable.isNotEmpty) {
-      // Birincil veya varsayılan takvimi tercih et
-      final primary = writable.firstWhere(
+      final calendarsResult = await _plugin.retrieveCalendars();
+      if (!calendarsResult.isSuccess ||
+          calendarsResult.data == null ||
+          calendarsResult.data!.isEmpty) {
+        return null;
+      }
+
+      final writableCalendars =
+          calendarsResult.data!.where((c) => c.isReadOnly == false).toList();
+      if (writableCalendars.isEmpty) return null;
+
+      if (savedId != null && writableCalendars.any((c) => c.id == savedId)) {
+        return savedId;
+      }
+
+      final defaultCal = writableCalendars.firstWhere(
         (c) => c.isDefault == true,
-        orElse: () => writable.first,
+        orElse: () => writableCalendars.first,
       );
-      await setSelectedCalendarId(primary.id!);
-      return primary.id;
+
+      await prefs.setString('default_calendar_id', defaultCal.id!);
+      return defaultCal.id;
+    } catch (e) {
+      debugPrint("Varsayılan takvim belirleme hatası: $e");
+      return null;
     }
-    return null;
   }
 
   static Future<String?> addOrUpdateEvent({
-    required TaskItem task,
-    required DateTime targetDate,
+    required String calendarId,
+    String? existingEventId,
+    required String title,
+    required DateTime startTime,
+    required int durationMinutes,
+    String? description,
   }) async {
     try {
-      final calendarId = await getDefaultCalendarId();
-      if (calendarId == null) return null;
+      final hasPerm = await requestPermissions();
+      if (!hasPerm) return null;
 
-      final startTime = task.startDateTime;
-      final start = DateTime(
-        targetDate.year,
-        targetDate.month,
-        targetDate.day,
-        startTime.hour,
-        startTime.minute,
-      );
-      final end = start.add(Duration(minutes: task.durationMinutes));
+      final startTz = tz.TZDateTime.from(startTime, tz.local);
+      final endTz = startTz.add(Duration(minutes: durationMinutes));
 
       final event = Event(
         calendarId,
-        eventId: task.calendarEventId,
-        title: '[WeeklyPulse] ${task.title}',
-        description: 'Öncelik: ${task.priority}\nKategori: ${task.category}',
-        start: tz.TZDateTime.from(start, tz.local),
-        end: tz.TZDateTime.from(end, tz.local),
+        eventId: existingEventId,
+        title: title,
+        start: startTz,
+        end: endTz,
+        description: description ?? 'WeeklyPulse Planı',
       );
 
-      // Event dışarıdan silinmişse (recovery): update dene, olmazsa yeni event oluştur
-      if (task.calendarEventId != null && task.calendarEventId!.isNotEmpty) {
-        final updateResult =
-            await _deviceCalendarPlugin.createOrUpdateEvent(event);
-        if (updateResult?.isSuccess == true && updateResult?.data != null) {
-          return updateResult!.data;
+      if (existingEventId != null && existingEventId.isNotEmpty) {
+        final updateRes = await _plugin.createOrUpdateEvent(event);
+        if (updateRes != null &&
+            updateRes.isSuccess &&
+            updateRes.data != null) {
+          return updateRes.data;
         }
+        // WP-007 FIX: Güncelleme başarısız olduğunda hemen yeni kayıt açıp duplicate yapma.
+        debugPrint(
+            "Takvim güncelleme başarısız oldu, mükerrer kaydı önlemek için iptal edildi: ${updateRes?.errors.map((e) => e.errorMessage).toList()}");
+        return null;
       }
 
-      // Yeni etkinlik oluştur
-      event.eventId = null;
-      final createResult =
-          await _deviceCalendarPlugin.createOrUpdateEvent(event);
-      if (createResult?.isSuccess == true) {
-        return createResult?.data;
+      final createRes = await _plugin.createOrUpdateEvent(event);
+      if (createRes != null && createRes.isSuccess && createRes.data != null) {
+        return createRes.data;
       }
       return null;
     } catch (e) {
-      debugPrint("Calendar addOrUpdateEvent Hatası: $e");
+      debugPrint("Takvim event işlem hatası: $e");
       return null;
     }
   }
 
   static Future<bool> deleteEvent(String calendarId, String eventId) async {
     try {
-      final hasPermission = await requestPermissions();
-      if (!hasPermission) return false;
+      final hasPerm = await requestPermissions();
+      if (!hasPerm) return false;
 
-      final res = await _deviceCalendarPlugin.deleteEvent(calendarId, eventId);
-      // Etkinlik zaten yoksa da silinmiş kabul edilir
-      return res.isSuccess;
+      final res = await _plugin.deleteEvent(calendarId, eventId);
+      return res.isSuccess && (res.data ?? false);
     } catch (e) {
-      debugPrint("Calendar deleteEvent Hatası: $e");
+      debugPrint("Takvim silme hatası: $e");
       return false;
     }
   }
