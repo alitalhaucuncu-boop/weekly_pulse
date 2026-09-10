@@ -1,4 +1,3 @@
-import 'dart:ui';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:timezone/timezone.dart' as tz;
@@ -37,7 +36,7 @@ class NotificationService {
   static Future<void> initialize() async {
     try {
       tz_data.initializeTimeZones();
-      final String currentTimeZone = 'Europe/Istanbul';
+      const String currentTimeZone = 'Europe/Istanbul';
       tz.setLocalLocation(tz.getLocation(currentTimeZone));
 
       const AndroidInitializationSettings androidSettings =
@@ -59,7 +58,6 @@ class NotificationService {
       await _notificationsPlugin.initialize(
         initSettings,
         onDidReceiveNotificationResponse: (NotificationResponse response) {
-          // WP-009 FIX: Tıklama payload'ı merkezi yönlendiriciye iletildi
           final payload = response.payload;
           if (payload != null && payload.isNotEmpty) {
             debugPrint("Bildirime tıklandı, hedef payload: $payload");
@@ -92,9 +90,15 @@ class NotificationService {
       }
 
       int minutesBefore = 60;
-      if (task.reminderTime == '30 Dakika Önce') minutesBefore = 30;
-      if (task.reminderTime == '15 Dakika Önce') minutesBefore = 15;
-      if (task.reminderTime == '1 Gün Önce') minutesBefore = 1440;
+      if (task.reminderTime == '30 Dakika Önce') {
+        minutesBefore = 30;
+      }
+      if (task.reminderTime == '15 Dakika Önce') {
+        minutesBefore = 15;
+      }
+      if (task.reminderTime == '1 Gün Önce') {
+        minutesBefore = 1440;
+      }
 
       int hour = 10;
       int minute = 0;
@@ -190,7 +194,6 @@ class NotificationService {
   static Future<void> scheduleWeeklyReportNotification({
     required String userTierName,
   }) async {
-    // WP-008 FIX: show() yerine gelecek Pazar akşamı 20:00'a zonedSchedule
     try {
       final now = DateTime.now();
       int daysUntilSunday = (DateTime.sunday - now.weekday) % 7;

@@ -71,7 +71,6 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
 
   List<TaskItem> allFetchedTasks = [];
   List<TaskItem> allMonthFetchedTasks = [];
-  // WP-031 FIX: Aylık takvim için O(1) arama haritası
   Map<String, List<TaskItem>> _monthTasksByDate = {};
 
   String _formatDateToKey(DateTime date) {
@@ -100,7 +99,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
 
   Future<bool> focusOnTaskById(String taskId) async {
     final user = supabase.auth.currentUser;
-    if (user == null) return false;
+    if (user == null) {
+      return false;
+    }
 
     TaskItem? targetTask = allFetchedTasks.firstWhere((t) => t.id == taskId,
         orElse: () => allMonthFetchedTasks.firstWhere((t) => t.id == taskId,
@@ -159,7 +160,6 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
     selectedDayIndex = now.weekday - 1;
     selectedCalendarDay = DateTime(now.year, now.month, now.day);
 
-    // WP-009 FIX: Bildirim tıklama olayını dinle
     onGlobalNotificationPayloadReceived = (taskId) {
       if (mounted) {
         focusOnTaskById(taskId);
@@ -194,7 +194,6 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
   void _loadPreferences() async {
     final prefs = await SharedPreferences.getInstance();
     final savedMode = prefs.getString('active_mode');
-    // WP-019 FIX: Mod allowlist kontrolü
     if (savedMode != null && (savedMode == 'student' || savedMode == 'pro')) {
       if (mounted) {
         setState(() {
@@ -220,7 +219,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
 
   Future<void> _loadUserProfileAndResetWeeklyQuotas() async {
     final user = supabase.auth.currentUser;
-    if (user == null) return;
+    if (user == null) {
+      return;
+    }
 
     try {
       final dynamic syncRes = await supabase.rpc('sync_my_profile_status');
@@ -266,7 +267,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
     }
 
     if (busiestDay == -1 || maxScore < 60 || lightestDay == busiestDay) {
-      if (!mounted) return;
+      if (!mounted) {
+        return;
+      }
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('✨ Haftalık planın zaten dengeli görünüyor!'),
@@ -315,7 +318,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
     }
 
     if (candidateTask == null) {
-      if (!mounted) return;
+      if (!mounted) {
+        return;
+      }
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
             content: Text(
@@ -380,7 +385,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                 final scaffoldMessenger = ScaffoldMessenger.of(context);
                 Navigator.pop(dialogContext);
                 final result = await _moveTaskToNewDay(targetTask, lightestDay);
-                if (!mounted) return;
+                if (!mounted) {
+                  return;
+                }
 
                 if (result.isSuccess) {
                   _confettiController.play();
@@ -717,7 +724,6 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                           }
 
                           try {
-                            // WP-012 FIX: Kullanıcının geçmiş/gelecek tüm takvim event'lerini çekip sil
                             try {
                               final dynamic calEventsRes = await supabase
                                   .rpc('get_all_user_calendar_events');
@@ -828,7 +834,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                       await NotificationService.cancelNotification(99999);
                     } catch (_) {}
 
-                    if (!mounted) return;
+                    if (!mounted) {
+                      return;
+                    }
                     setState(() {
                       isUserPremium = false;
                       userTierName = 'Free';
@@ -842,7 +850,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                           content: Text('Aboneliğiniz iptal edildi.')),
                     );
                   } else {
-                    if (!mounted) return;
+                    if (!mounted) {
+                      return;
+                    }
                     if (dialogContext.mounted) {
                       dialogNav.pop();
                     }
@@ -853,7 +863,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                   }
                 } catch (e) {
                   debugPrint("İptal Hatası: $e");
-                  if (!mounted) return;
+                  if (!mounted) {
+                    return;
+                  }
                   if (dialogContext.mounted) {
                     dialogNav.pop();
                   }
@@ -873,7 +885,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
   }
 
   void _showAIAnalysisModal() async {
-    if (_isAIAnalyzing) return;
+    if (_isAIAnalyzing) {
+      return;
+    }
     setState(() => _isAIAnalyzing = true);
 
     final scaffoldMessenger = ScaffoldMessenger.of(context);
@@ -939,7 +953,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
         return;
       }
 
-      if (!mounted) return;
+      if (!mounted) {
+        return;
+      }
 
       showModalBottomSheet(
         context: context,
@@ -1316,7 +1332,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
 
     if (targetWeekday != -1) {
       int diff = targetWeekday - todayMidnight.weekday;
-      if (diff <= 0) diff += 7;
+      if (diff <= 0) {
+        diff += 7;
+      }
       targetDate = todayMidnight.add(Duration(days: diff));
     } else if (RegExp(r'\byarın\b').hasMatch(lower)) {
       targetDate = todayMidnight.add(const Duration(days: 1));
@@ -1615,7 +1633,6 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                       ),
                     ),
                     const SizedBox(height: 12),
-                    // WP-034: Gün değiştirme seçeneği
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
@@ -1628,7 +1645,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                               (idx) => DropdownMenuItem(
                                   value: idx, child: Text(fullWeekDays[idx]))),
                           onChanged: (v) {
-                            if (v != null) setStateModal(() => targetDay = v);
+                            if (v != null) {
+                              setStateModal(() => targetDay = v);
+                            }
                           },
                         ),
                       ],
@@ -1733,10 +1752,12 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                     now.add(const Duration(days: 730));
 
                                 DateTime initialDate = selectedDeadline ?? now;
-                                if (initialDate.isBefore(firstDate))
+                                if (initialDate.isBefore(firstDate)) {
                                   initialDate = firstDate;
-                                if (initialDate.isAfter(lastDate))
+                                }
+                                if (initialDate.isAfter(lastDate)) {
                                   initialDate = lastDate;
+                                }
 
                                 final DateTime? pickedDate =
                                     await showDatePicker(
@@ -1746,8 +1767,10 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                   lastDate: lastDate,
                                 );
 
-                                if (pickedDate == null || !modalContext.mounted)
+                                if (pickedDate == null ||
+                                    !modalContext.mounted) {
                                   return;
+                                }
 
                                 final TimeOfDay? pickedTime =
                                     await showTimePicker(
@@ -1803,7 +1826,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                             ? null
                             : () async {
                                 final newTitle = titleController.text.trim();
-                                if (newTitle.isEmpty) return;
+                                if (newTitle.isEmpty) {
+                                  return;
+                                }
 
                                 final newDate = currentWeekMonday
                                     .add(Duration(days: targetDay));
@@ -1840,7 +1865,6 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                 final derivedDayIndex = newDate.weekday - 1;
 
                                 try {
-                                  // WP-014 FIX: p_expected_version zorunlu kılındı
                                   final res = await supabase.rpc(
                                     'save_task_mutation',
                                     params: {
@@ -1891,7 +1915,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                       targetDate: newDate,
                                     );
 
-                                    if (!mounted) return;
+                                    if (!mounted) {
+                                      return;
+                                    }
 
                                     _fetchTasks();
                                     _fetchAllTasksForMonth(focusedCalendarDay);
@@ -1910,7 +1936,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                     final errCode =
                                         (res is Map) ? res['code'] : null;
                                     if (errCode == 'VERSION_CONFLICT') {
-                                      if (modalContext.mounted) modalNav.pop();
+                                      if (modalContext.mounted) {
+                                        modalNav.pop();
+                                      }
                                       scaffoldMessenger.showSnackBar(
                                         const SnackBar(
                                           content: Text(
@@ -2126,10 +2154,12 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                     now.add(const Duration(days: 730));
 
                                 DateTime initialDate = selectedDeadline ?? now;
-                                if (initialDate.isBefore(firstDate))
+                                if (initialDate.isBefore(firstDate)) {
                                   initialDate = firstDate;
-                                if (initialDate.isAfter(lastDate))
+                                }
+                                if (initialDate.isAfter(lastDate)) {
                                   initialDate = lastDate;
+                                }
 
                                 final DateTime? pickedDate =
                                     await showDatePicker(
@@ -2139,8 +2169,10 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                   lastDate: lastDate,
                                 );
 
-                                if (pickedDate == null || !modalContext.mounted)
+                                if (pickedDate == null ||
+                                    !modalContext.mounted) {
                                   return;
+                                }
 
                                 final TimeOfDay? pickedTime =
                                     await showTimePicker(
@@ -2343,7 +2375,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
     });
     try {
       final user = supabase.auth.currentUser;
-      if (user == null) return;
+      if (user == null) {
+        return;
+      }
 
       final response = await supabase
           .from('weekly_tasks')
@@ -2353,7 +2387,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
           .order('scheduled_date', ascending: true)
           .order('task_time', ascending: true);
 
-      if (generation != _fetchGeneration) return;
+      if (generation != _fetchGeneration) {
+        return;
+      }
 
       List<TaskItem> loaded = [];
       for (var row in response) {
@@ -2385,7 +2421,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
     final int gen = ++_monthFetchGeneration;
     try {
       final user = supabase.auth.currentUser;
-      if (user == null) return;
+      if (user == null) {
+        return;
+      }
 
       final firstDay = DateTime(monthDate.year, monthDate.month - 1, 20);
       final lastDay = DateTime(monthDate.year, monthDate.month + 1, 10);
@@ -2399,7 +2437,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
           .order('scheduled_date', ascending: true)
           .order('task_time', ascending: true);
 
-      if (gen != _monthFetchGeneration) return;
+      if (gen != _monthFetchGeneration) {
+        return;
+      }
 
       List<TaskItem> loaded = [];
       Map<String, List<TaskItem>> grouped = {};
@@ -2650,7 +2690,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
       } else {
         final code = (res is Map) ? res['code'] : null;
         if (code == 'VERSION_CONFLICT') {
-          if (!mounted) return;
+          if (!mounted) {
+            return;
+          }
           _fetchTasks();
           scaffoldMessenger.showSnackBar(
             const SnackBar(
@@ -2671,18 +2713,34 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
   }
 
   Color _getWorkloadColor(int score) {
-    if (score == 0) return Colors.grey.shade400;
-    if (score < 40) return Colors.green;
-    if (score < 75) return Colors.blue;
-    if (score <= 100) return Colors.orange;
+    if (score == 0) {
+      return Colors.grey.shade400;
+    }
+    if (score < 40) {
+      return Colors.green;
+    }
+    if (score < 75) {
+      return Colors.blue;
+    }
+    if (score <= 100) {
+      return Colors.orange;
+    }
     return Colors.redAccent;
   }
 
   String _getWorkloadLabel(int score) {
-    if (score == 0) return "Boş / Serbest";
-    if (score < 40) return "Hafif & Rahat ☕";
-    if (score < 75) return "İdeal & Dengeli ⚡";
-    if (score <= 100) return "Yoğun Kapasite 💼";
+    if (score == 0) {
+      return "Boş / Serbest";
+    }
+    if (score < 40) {
+      return "Hafif & Rahat ☕";
+    }
+    if (score < 75) {
+      return "İdeal & Dengeli ⚡";
+    }
+    if (score <= 100) {
+      return "Yoğun Kapasite 💼";
+    }
     return "Aşırı Yük 🚨";
   }
 
@@ -3102,7 +3160,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                   onAcceptWithDetails: (details) async {
                     final scaffoldMessenger = ScaffoldMessenger.of(context);
                     final result = await _moveTaskToNewDay(details.data, index);
-                    if (!mounted) return;
+                    if (!mounted) {
+                      return;
+                    }
                     if (result.isBusy) {
                       scaffoldMessenger.showSnackBar(
                         const SnackBar(
@@ -3187,7 +3247,6 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
 
   Widget _buildMonthlyCalendarView(Color primaryColor) {
     final String selectedDateKey = _formatDateToKey(selectedCalendarDay);
-    // WP-031 FIX: O(1) harita tabanlı arama
     final List<TaskItem> tasksForSelectedDay =
         (_monthTasksByDate[selectedDateKey] ?? [])
             .where((t) => t.taskMode == activeMode)
@@ -3220,7 +3279,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
             ),
             calendarBuilders: CalendarBuilders(
               markerBuilder: (context, day, events) {
-                if (events.isEmpty) return null;
+                if (events.isEmpty) {
+                  return null;
+                }
                 return Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: events.take(4).map((event) {
@@ -3263,7 +3324,6 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
               });
               _fetchTasks();
             },
-            // WP-031 FIX: Her hücre için O(1) arama
             eventLoader: (day) {
               final dateStr = _formatDateToKey(day);
               return (_monthTasksByDate[dateStr] ?? [])
@@ -3291,7 +3351,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                   final scaffoldMessenger = ScaffoldMessenger.of(context);
                   final res = await TaskSyncCoordinator.coordinateTaskSync(
                       task: task, targetDate: d);
-                  if (!mounted) return;
+                  if (!mounted) {
+                    return;
+                  }
                   _fetchTasks();
                   final syncMsg = res.isFullySynced
                       ? '✨ Görev eşitlendi!'
@@ -3370,31 +3432,40 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                       activeTasks: activeTasks,
                     );
 
-                    if (!mounted) return;
+                    if (!mounted) {
+                      return;
+                    }
                     _fetchTasks();
                     _fetchAllTasksForMonth(focusedCalendarDay);
 
                     List<String> outcomeParts = [];
-                    if (res.successCount > 0)
+                    if (res.successCount > 0) {
                       outcomeParts.add('${res.successCount} tam başarıyla');
-                    if (res.partialSyncCount > 0)
+                    }
+                    if (res.partialSyncCount > 0) {
                       outcomeParts
                           .add('${res.partialSyncCount} kısmi eşitlemeyle');
-                    if (res.skippedConflictCount > 0)
+                    }
+                    if (res.skippedConflictCount > 0) {
                       outcomeParts.add(
                           '${res.skippedConflictCount} çakışma nedeniyle atlandı');
-                    if (res.skippedDeadlineCount > 0)
+                    }
+                    if (res.skippedDeadlineCount > 0) {
                       outcomeParts
                           .add('${res.skippedDeadlineCount} deadline aşımı');
-                    if (res.databaseUpdateFailedCount > 0)
+                    }
+                    if (res.databaseUpdateFailedCount > 0) {
                       outcomeParts.add(
                           '${res.databaseUpdateFailedCount} veritabanı hatası');
-                    if (res.databaseReadFailedCount > 0)
+                    }
+                    if (res.databaseReadFailedCount > 0) {
                       outcomeParts
                           .add('${res.databaseReadFailedCount} okuma hatası');
-                    if (res.syncFailedCount > 0)
+                    }
+                    if (res.syncFailedCount > 0) {
                       outcomeParts
                           .add('${res.syncFailedCount} senkronizasyon hatası');
+                    }
 
                     final summaryText = outcomeParts.isEmpty
                         ? 'Kurtarılacak uygun plan bulunamadı.'
@@ -3479,7 +3550,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                     final scaffoldMessenger = ScaffoldMessenger.of(context);
                     final res = await TaskSyncCoordinator.coordinateTaskSync(
                         task: task, targetDate: d);
-                    if (!mounted) return;
+                    if (!mounted) {
+                      return;
+                    }
                     _fetchTasks();
                     final syncMsg = res.isFullySynced
                         ? '✨ Görev eşitlendi!'
@@ -3559,7 +3632,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                       final scaffoldMessenger = ScaffoldMessenger.of(context);
                       final res = await TaskSyncCoordinator.coordinateTaskSync(
                           task: task, targetDate: d);
-                      if (!mounted) return;
+                      if (!mounted) {
+                        return;
+                      }
                       _fetchTasks();
                       final syncMsg = res.isFullySynced
                           ? '✨ Görev eşitlendi!'
@@ -3632,14 +3707,18 @@ class _VoiceInputBottomSheetState extends State<VoiceInputBottomSheet> {
         onError: (e) => debugPrint('STT Hata: $e'),
         onStatus: (s) => debugPrint('STT Durum: $s'),
       );
-      if (mounted) setState(() => _speechAvailable = available);
+      if (mounted) {
+        setState(() => _speechAvailable = available);
+      }
     } catch (_) {}
   }
 
   Future<void> _toggleListening() async {
     if (_isListening) {
       await _speech.stop();
-      if (mounted) setState(() => _isListening = false);
+      if (mounted) {
+        setState(() => _isListening = false);
+      }
     } else {
       if (_speechAvailable) {
         setState(() {
@@ -3670,9 +3749,13 @@ class _VoiceInputBottomSheetState extends State<VoiceInputBottomSheet> {
 
   Future<void> _safeClose() async {
     try {
-      if (_speech.isListening) await _speech.stop();
+      if (_speech.isListening) {
+        await _speech.stop();
+      }
     } catch (_) {}
-    if (mounted) Navigator.of(context).pop();
+    if (mounted) {
+      Navigator.of(context).pop();
+    }
   }
 
   @override
@@ -3734,8 +3817,11 @@ class _VoiceInputBottomSheetState extends State<VoiceInputBottomSheet> {
                       _isListening ? Colors.redAccent : const Color(0xFF7895CB),
                   shape: BoxShape.circle,
                 ),
-                child: Icon(_isListening ? Icons.mic : Icons.mic_none,
-                    color: Colors.white, size: 36),
+                child: Icon(
+                  _isListening ? Icons.mic : Icons.mic_none,
+                  color: Colors.white,
+                  size: 36,
+                ),
               ),
             ),
             const SizedBox(height: 16),
@@ -3811,13 +3897,18 @@ class _VoiceInputBottomSheetState extends State<VoiceInputBottomSheet> {
                               return;
                             }
 
+                            // Asenkron işlem öncesi Navigator referansını al
+                            final nav = Navigator.of(context);
+
                             setState(() {
                               _isSaving = true;
                               _modalError = null;
                             });
 
                             try {
-                              if (_speech.isListening) await _speech.stop();
+                              if (_speech.isListening) {
+                                await _speech.stop();
+                              }
                             } catch (_) {}
 
                             final user = supabase.auth.currentUser;
@@ -3862,7 +3953,9 @@ class _VoiceInputBottomSheetState extends State<VoiceInputBottomSheet> {
                                 },
                               );
 
-                              if (!mounted) return;
+                              if (!mounted) {
+                                return;
+                              }
 
                               if (res is! Map || res['success'] != true) {
                                 final errCode =
@@ -3871,7 +3964,7 @@ class _VoiceInputBottomSheetState extends State<VoiceInputBottomSheet> {
                                     (res is Map) ? res['message'] : null;
 
                                 if (errCode == 'QUOTA_EXCEEDED') {
-                                  Navigator.of(context).pop();
+                                  nav.pop();
                                   widget.onQuotaExceeded(errMsg ??
                                       'Haftalık 3 sesli komut kotanız doldu.');
                                   return;
@@ -3886,7 +3979,7 @@ class _VoiceInputBottomSheetState extends State<VoiceInputBottomSheet> {
 
                               final createdTask =
                                   TaskItem.fromJson(res['task']);
-                              Navigator.of(context).pop();
+                              nav.pop();
                               widget.onTaskCreated();
 
                               await TaskSyncCoordinator.coordinateTaskSync(

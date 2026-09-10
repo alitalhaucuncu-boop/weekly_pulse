@@ -1,119 +1,115 @@
-import 'package:device_calendar/device_calendar.dart';
 import 'package:flutter/foundation.dart';
+import 'package:device_calendar/device_calendar.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:timezone/timezone.dart' as tz;
-import '../domain/models/task_item.dart';
 
 class CalendarService {
-  static final DeviceCalendarPlugin _deviceCalendarPlugin =
-      DeviceCalendarPlugin();
-  static const String _prefCalendarKey = 'selected_calendar_id';
+  static final DeviceCalendarPlugin _plugin = DeviceCalendarPlugin();
 
   static Future<bool> requestPermissions() async {
-    var permissionsGranted = await _deviceCalendarPlugin.hasPermissions();
-    if (permissionsGranted.isSuccess && !permissionsGranted.data!) {
-      permissionsGranted = await _deviceCalendarPlugin.requestPermissions();
+    try {
+      var permissionsGranted = await _plugin.hasPermissions();
+      if (permissionsGranted.isSuccess && !permissionsGranted.data!) {
+        permissionsGranted = await _plugin.requestPermissions();
+        return permissionsGranted.isSuccess && permissionsGranted.data!;
+      }
       return permissionsGranted.isSuccess && permissionsGranted.data!;
+    } catch (e) {
+      debugPrint("Takvim izin hatası: $e");
+      return false;
     }
-    return permissionsGranted.isSuccess && permissionsGranted.data!;
-  }
-
-  static Future<List<Calendar>> getWritableCalendars() async {
-    final hasPermission = await requestPermissions();
-    if (!hasPermission) return [];
-
-    final calendarsResult = await _deviceCalendarPlugin.retrieveCalendars();
-    if (calendarsResult.isSuccess && calendarsResult.data != null) {
-      return calendarsResult.data!.where((c) => c.isReadOnly == false).toList();
-    }
-    return [];
-  }
-
-  static Future<void> setSelectedCalendarId(String calendarId) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_prefCalendarKey, calendarId);
   }
 
   static Future<String?> getDefaultCalendarId() async {
-    final prefs = await SharedPreferences.getInstance();
-    final savedId = prefs.getString(_prefCalendarKey);
-    if (savedId != null && savedId.isNotEmpty) {
-      return savedId;
-    }
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final savedId = prefs.getString('default_calendar_id');
 
-    final writable = await getWritableCalendars();
-    if (writable.isNotEmpty) {
-      // Birincil veya varsayılan takvimi tercih et
-      final primary = writable.firstWhere(
+      final calendarsResult = await _plugin.retrieveCalendars();
+      if (!calendarsResult.isSuccess ||
+          calendarsResult.data == null ||
+          calendarsResult.data!.isEmpty) {
+        return null;
+      }
+
+      final writableCalendars =
+          calendarsResult.data!.where((c) => c.isReadOnly == false).toList();
+      if (writableCalendars.isEmpty) return null;
+
+      if (savedId != null && writableCalendars.any((c) => c.id == savedId)) {
+        return savedId;
+      }
+
+      final defaultCal = writableCalendars.firstWhere(
         (c) => c.isDefault == true,
-        orElse: () => writable.first,
+        orElse: () => writableCalendars.first,
       );
-      await setSelectedCalendarId(primary.id!);
-      return primary.id;
+
+      await prefs.setString('default_calendar_id', defaultCal.id!);
+      return defaultCal.id;
+    } catch (e) {
+      debugPrint("Varsayılan takvim belirleme hatası: $e");
+      return null;
     }
-    return null;
   }
 
   static Future<String?> addOrUpdateEvent({
-    required TaskItem task,
-    required DateTime targetDate,
+    required String calendarId,
+    String? existingEventId,
+    required String title,
+    required DateTime startTime,
+    required int durationMinutes,
+    String? description,
   }) async {
     try {
-      final calendarId = await getDefaultCalendarId();
-      if (calendarId == null) return null;
+      final hasPerm = await requestPermissions();
+      if (!hasPerm) return null;
 
-      final startTime = task.startDateTime;
-      final start = DateTime(
-        targetDate.year,
-        targetDate.month,
-        targetDate.day,
-        startTime.hour,
-        startTime.minute,
-      );
-      final end = start.add(Duration(minutes: task.durationMinutes));
+      final startTz = tz.TZDateTime.from(startTime, tz.local);
+      final endTz = startTz.add(Duration(minutes: durationMinutes));
 
       final event = Event(
         calendarId,
-        eventId: task.calendarEventId,
-        title: '[WeeklyPulse] ${task.title}',
-        description: 'Öncelik: ${task.priority}\nKategori: ${task.category}',
-        start: tz.TZDateTime.from(start, tz.local),
-        end: tz.TZDateTime.from(end, tz.local),
+        eventId: existingEventId,
+        title: title,
+        start: startTz,
+        end: endTz,
+        description: description ?? 'WeeklyPulse Planı',
       );
 
-      // Event dışarıdan silinmişse (recovery): update dene, olmazsa yeni event oluştur
-      if (task.calendarEventId != null && task.calendarEventId!.isNotEmpty) {
-        final updateResult =
-            await _deviceCalendarPlugin.createOrUpdateEvent(event);
-        if (updateResult?.isSuccess == true && updateResult?.data != null) {
-          return updateResult!.data;
+      if (existingEventId != null && existingEventId.isNotEmpty) {
+        final updateRes = await _plugin.createOrUpdateEvent(event);
+        if (updateRes != null &&
+            updateRes.isSuccess &&
+            updateRes.data != null) {
+          return updateRes.data;
         }
+        // WP-007 FIX: Güncelleme başarısız olduğunda hemen yeni kayıt açıp duplicate yapma.
+        debugPrint(
+            "Takvim güncelleme başarısız oldu, mükerrer kaydı önlemek için iptal edildi: ${updateRes?.errors.map((e) => e.errorMessage).toList()}");
+        return null;
       }
 
-      // Yeni etkinlik oluştur
-      event.eventId = null;
-      final createResult =
-          await _deviceCalendarPlugin.createOrUpdateEvent(event);
-      if (createResult?.isSuccess == true) {
-        return createResult?.data;
+      final createRes = await _plugin.createOrUpdateEvent(event);
+      if (createRes != null && createRes.isSuccess && createRes.data != null) {
+        return createRes.data;
       }
       return null;
     } catch (e) {
-      debugPrint("Calendar addOrUpdateEvent Hatası: $e");
+      debugPrint("Takvim event işlem hatası: $e");
       return null;
     }
   }
 
   static Future<bool> deleteEvent(String calendarId, String eventId) async {
     try {
-      final hasPermission = await requestPermissions();
-      if (!hasPermission) return false;
+      final hasPerm = await requestPermissions();
+      if (!hasPerm) return false;
 
-      final res = await _deviceCalendarPlugin.deleteEvent(calendarId, eventId);
-      // Etkinlik zaten yoksa da silinmiş kabul edilir
-      return res.isSuccess;
+      final res = await _plugin.deleteEvent(calendarId, eventId);
+      return res.isSuccess && (res.data ?? false);
     } catch (e) {
-      debugPrint("Calendar deleteEvent Hatası: $e");
+      debugPrint("Takvim silme hatası: $e");
       return false;
     }
   }
@@ -121,210 +117,235 @@ class CalendarService {
 
 
 
+import 'dart:ui';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:timezone/timezone.dart' as tz;
 import 'package:timezone/data/latest_all.dart' as tz_data;
-import 'package:flutter_timezone/flutter_timezone.dart';
-
 import '../domain/models/task_item.dart';
 
-enum NotificationScheduleResult {
+enum NotificationScheduleStatus {
   scheduled,
   skippedPast,
   skippedNoReminder,
   failed,
 }
 
+class NotificationScheduleResult {
+  final NotificationScheduleStatus status;
+  final String? message;
+
+  const NotificationScheduleResult({required this.status, this.message});
+
+  bool get isScheduled => status == NotificationScheduleStatus.scheduled;
+}
+
+Function(String taskId)? onGlobalNotificationPayloadReceived;
+
 class NotificationService {
   static final FlutterLocalNotificationsPlugin _notificationsPlugin =
       FlutterLocalNotificationsPlugin();
-
-  static FlutterLocalNotificationsPlugin get plugin => _notificationsPlugin;
-
-  static bool _isInitialized = false;
 
   static int resolveNotificationId({required TaskItem task}) {
     if (task.notificationId != null && task.notificationId! > 0) {
       return task.notificationId!;
     }
-    if (task.id.isNotEmpty) {
-      final int hash = task.id.hashCode.abs();
-      return hash % 2147483647;
-    }
-    return DateTime.now().millisecondsSinceEpoch % 2147483647;
+    return (task.id.hashCode & 0x7fffffff);
   }
 
   static Future<void> initialize() async {
-    if (_isInitialized) return;
-
-    tz_data.initializeTimeZones();
     try {
-      final dynamic tzResult = await FlutterTimezone.getLocalTimezone();
-      final String currentTimeZone =
-          tzResult is String ? tzResult : tzResult.toString();
+      tz_data.initializeTimeZones();
+      final String currentTimeZone = 'Europe/Istanbul';
       tz.setLocalLocation(tz.getLocation(currentTimeZone));
+
+      const AndroidInitializationSettings androidSettings =
+          AndroidInitializationSettings('@mipmap/ic_launcher');
+
+      const DarwinInitializationSettings iosSettings =
+          DarwinInitializationSettings(
+        requestAlertPermission: true,
+        requestBadgePermission: true,
+        requestSoundPermission: true,
+      );
+
+      const InitializationSettings initSettings = InitializationSettings(
+        android: androidSettings,
+        iOS: iosSettings,
+        macOS: iosSettings,
+      );
+
+      await _notificationsPlugin.initialize(
+        initSettings,
+        onDidReceiveNotificationResponse: (NotificationResponse response) {
+          // WP-009 FIX: Tıklama payload'ı merkezi yönlendiriciye iletildi
+          final payload = response.payload;
+          if (payload != null && payload.isNotEmpty) {
+            debugPrint("Bildirime tıklandı, hedef payload: $payload");
+            onGlobalNotificationPayloadReceived?.call(payload);
+          }
+        },
+      );
+
+      final androidPlugin =
+          _notificationsPlugin.resolvePlatformSpecificImplementation<
+              AndroidFlutterLocalNotificationsPlugin>();
+      if (androidPlugin != null) {
+        await androidPlugin.requestNotificationsPermission();
+      }
     } catch (e) {
-      debugPrint("Saat Dilimi Hatası (UTC fallback): $e");
-      tz.setLocalLocation(tz.UTC);
+      debugPrint("Bildirim başlatma hatası: $e");
     }
-
-    const AndroidInitializationSettings initializationSettingsAndroid =
-        AndroidInitializationSettings('@mipmap/ic_launcher');
-
-    const DarwinInitializationSettings initializationSettingsDarwin =
-        DarwinInitializationSettings(
-      requestAlertPermission: true,
-      requestBadgePermission: true,
-      requestSoundPermission: true,
-    );
-
-    const InitializationSettings initializationSettings =
-        InitializationSettings(
-      android: initializationSettingsAndroid,
-      iOS: initializationSettingsDarwin,
-    );
-
-    await _notificationsPlugin.initialize(
-      initializationSettings,
-      onDidReceiveNotificationResponse: (NotificationResponse response) {
-        debugPrint("Bildirime tıklandı: ${response.payload}");
-      },
-    );
-
-    _isInitialized = true;
   }
 
-  static Future<NotificationScheduleResult> scheduleTaskNotification({
+  static Future<NotificationScheduleResult> scheduleTaskReminder({
     required TaskItem task,
     required DateTime targetDate,
   }) async {
-    await initialize();
-
-    if (task.reminderTime == 'Hatırlatma Yok') {
-      return NotificationScheduleResult.skippedNoReminder;
-    }
-
-    final int notifId = resolveNotificationId(task: task);
-
-    int hour = 10;
-    int minute = 0;
-    final timeParts = task.taskTime.split(':');
-    if (timeParts.length == 2) {
-      hour = int.tryParse(timeParts[0]) ?? 10;
-      minute = int.tryParse(timeParts[1]) ?? 0;
-    }
-
-    DateTime taskScheduledDateTime = DateTime(
-      targetDate.year,
-      targetDate.month,
-      targetDate.day,
-      hour,
-      minute,
-    );
-
-    int reminderOffsetMinutes = 60;
-    if (task.reminderTime == 'Zamanında') {
-      reminderOffsetMinutes = 0;
-    } else if (task.reminderTime == '10 Dakika Önce') {
-      reminderOffsetMinutes = 10;
-    } else if (task.reminderTime == '30 Dakika Önce') {
-      reminderOffsetMinutes = 30;
-    } else if (task.reminderTime == '1 Saat Önce') {
-      reminderOffsetMinutes = 60;
-    } else if (task.reminderTime == '1 Gün Önce') {
-      reminderOffsetMinutes = 1440;
-    }
-
-    final DateTime triggerDateTime = taskScheduledDateTime.subtract(
-      Duration(minutes: reminderOffsetMinutes),
-    );
-
-    if (triggerDateTime.isBefore(DateTime.now())) {
-      return NotificationScheduleResult.skippedPast;
-    }
-
-    const AndroidNotificationDetails androidDetails =
-        AndroidNotificationDetails(
-      'weekly_pulse_tasks_channel',
-      'Görev Hatırlatıcıları',
-      channelDescription:
-          'Haftalık planlanan görevler için hatırlatma bildirimleri',
-      importance: Importance.max,
-      priority: Priority.high,
-    );
-
-    const NotificationDetails notificationDetails =
-        NotificationDetails(android: androidDetails);
-
     try {
+      if (task.reminderTime == 'Yok' || task.reminderTime.isEmpty) {
+        return const NotificationScheduleResult(
+          status: NotificationScheduleStatus.skippedNoReminder,
+          message: 'Hatırlatıcı kapalı.',
+        );
+      }
+
+      int minutesBefore = 60;
+      if (task.reminderTime == '30 Dakika Önce') minutesBefore = 30;
+      if (task.reminderTime == '15 Dakika Önce') minutesBefore = 15;
+      if (task.reminderTime == '1 Gün Önce') minutesBefore = 1440;
+
+      int hour = 10;
+      int minute = 0;
+      final parts = task.taskTime.split(':');
+      if (parts.length == 2) {
+        hour = int.tryParse(parts[0]) ?? 10;
+        minute = int.tryParse(parts[1]) ?? 0;
+      }
+
+      final taskDateTime = DateTime(
+        targetDate.year,
+        targetDate.month,
+        targetDate.day,
+        hour,
+        minute,
+      );
+
+      final reminderDateTime =
+          taskDateTime.subtract(Duration(minutes: minutesBefore));
+
+      if (reminderDateTime.isBefore(DateTime.now())) {
+        return const NotificationScheduleResult(
+          status: NotificationScheduleStatus.skippedPast,
+          message: 'Hatırlatma zamanı geçmişte kaldı.',
+        );
+      }
+
+      final tz.TZDateTime scheduledDate =
+          tz.TZDateTime.from(reminderDateTime, tz.local);
+      final int notifId = resolveNotificationId(task: task);
+
+      const AndroidNotificationDetails androidDetails =
+          AndroidNotificationDetails(
+        'weekly_pulse_reminders',
+        'Görev Hatırlatıcıları',
+        channelDescription: 'Planlanan görevler için hatırlatma bildirimleri',
+        importance: Importance.max,
+        priority: Priority.high,
+      );
+
+      const DarwinNotificationDetails iosDetails = DarwinNotificationDetails(
+        presentAlert: true,
+        presentBadge: true,
+        presentSound: true,
+      );
+
+      const NotificationDetails platformDetails = NotificationDetails(
+        android: androidDetails,
+        iOS: iosDetails,
+        macOS: iosDetails,
+      );
+
       await _notificationsPlugin.zonedSchedule(
         notifId,
-        'Görev Vakti: ${task.title}',
-        'Öncelik: ${task.priority} | Süre: ${task.durationMinutes} dk',
-        tz.TZDateTime.from(triggerDateTime, tz.local),
-        notificationDetails,
+        'Planın Yaklaşıyor! ⚡',
+        '${task.title} saati geldi (${task.taskTime})',
+        scheduledDate,
+        platformDetails,
         androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
         uiLocalNotificationDateInterpretation:
             UILocalNotificationDateInterpretation.absoluteTime,
         payload: task.id,
       );
-      return NotificationScheduleResult.scheduled;
+
+      return const NotificationScheduleResult(
+        status: NotificationScheduleStatus.scheduled,
+      );
     } catch (e) {
-      debugPrint("Bildirim Planlama Hatası: $e");
-      return NotificationScheduleResult.failed;
+      debugPrint("Bildirim planlama hatası: $e");
+      return NotificationScheduleResult(
+        status: NotificationScheduleStatus.failed,
+        message: e.toString(),
+      );
     }
   }
 
-  static Future<bool> cancelNotification(int id) async {
+  static Future<void> cancelNotification(int id) async {
     try {
-      await initialize();
       await _notificationsPlugin.cancel(id);
-      return true;
     } catch (e) {
-      debugPrint("Bildirim İptal Hatası ($id): $e");
-      return false;
+      debugPrint("Bildirim iptal hatası ($id): $e");
     }
   }
 
-  static Future<bool> cancelAllNotifications() async {
+  static Future<void> cancelAllNotifications() async {
     try {
-      await initialize();
       await _notificationsPlugin.cancelAll();
-      return true;
     } catch (e) {
-      debugPrint("Tüm Bildirimleri İptal Hatası: $e");
-      return false;
+      debugPrint("Tüm bildirimleri iptal etme hatası: $e");
     }
   }
 
   static Future<void> scheduleWeeklyReportNotification({
     required String userTierName,
   }) async {
-    await initialize();
-    const int reportNotifId = 99999;
-
-    const AndroidNotificationDetails androidDetails =
-        AndroidNotificationDetails(
-      'weekly_pulse_report_channel',
-      'Haftalık Raporlar',
-      channelDescription: 'Haftalık zeka ve verimlilik raporları',
-      importance: Importance.defaultImportance,
-      priority: Priority.defaultPriority,
-    );
-
-    const NotificationDetails notificationDetails =
-        NotificationDetails(android: androidDetails);
-
+    // WP-008 FIX: show() yerine gelecek Pazar akşamı 20:00'a zonedSchedule
     try {
-      await _notificationsPlugin.show(
-        reportNotifId,
+      final now = DateTime.now();
+      int daysUntilSunday = (DateTime.sunday - now.weekday) % 7;
+      if (daysUntilSunday == 0 && now.hour >= 20) {
+        daysUntilSunday = 7;
+      }
+      final nextSunday =
+          DateTime(now.year, now.month, now.day + daysUntilSunday, 20, 0);
+      final tzScheduled = tz.TZDateTime.from(nextSunday, tz.local);
+
+      const AndroidNotificationDetails androidDetails =
+          AndroidNotificationDetails(
+        'weekly_pulse_intelligence',
+        'Haftalık Raporlar',
+        channelDescription: 'Haftalık yaşam ve plan analizi rapor bildirimleri',
+        importance: Importance.defaultImportance,
+        priority: Priority.defaultPriority,
+      );
+      const DarwinNotificationDetails iosDetails = DarwinNotificationDetails();
+      const NotificationDetails platformDetails = NotificationDetails(
+        android: androidDetails,
+        iOS: iosDetails,
+      );
+
+      await _notificationsPlugin.zonedSchedule(
+        99999,
         'Haftalık Zeka Raporun Hazır! 📊',
-        '$userTierName üyesi olarak yeni haftanın verimlilik analizini incele.',
-        notificationDetails,
+        'Geçen haftanın analizi tamamlandı. Yeni haftanı dengelemek için dokun.',
+        tzScheduled,
+        platformDetails,
+        androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+        uiLocalNotificationDateInterpretation:
+            UILocalNotificationDateInterpretation.absoluteTime,
       );
     } catch (e) {
-      debugPrint("Haftalık Rapor Bildirim Hatası: $e");
+      debugPrint("Haftalık rapor bildirimi kurulamadı: $e");
     }
   }
 }
@@ -670,10 +691,10 @@ class RecoveryEngine {
             'p_task_time': "${currentHour.toString().padLeft(2, '0')}:00",
             'p_duration_minutes': task.durationMinutes,
             'p_priority': task.priority,
+            'p_expected_version': expectedVer,
             'p_deadline': task.deadline?.toIso8601String(),
             'p_reminder_time': task.reminderTime,
             'p_is_completed': false,
-            'p_expected_version': expectedVer,
             'p_request_id':
                 'recovery_${task.id}_${DateTime.now().millisecondsSinceEpoch}',
           },
@@ -696,7 +717,11 @@ class RecoveryEngine {
           if (syncRes.isFullySynced) {
             success++;
           } else {
+            // WP-018 FIX: Senkronizasyon kısmi veya başarısızsa sayacı doğru güncelle
             partialSync++;
+            if (!syncRes.isCalendarSynced) {
+              syncFail++;
+            }
           }
 
           currentHour = (currentHour + (task.durationMinutes ~/ 60) + 1);
@@ -725,276 +750,197 @@ class RecoveryEngine {
 
 
 import 'package:flutter/foundation.dart';
-import '../../core/constants.dart';
-import '../../domain/models/task_item.dart';
-import '../../data/notification_service.dart';
-import '../../data/calendar_service.dart';
-
-enum CalendarSyncStatus { synced, skippedByUser, unavailable, failed }
+import '../core/constants.dart';
+import '../domain/models/task_item.dart';
+import '../data/notification_service.dart';
+import '../data/calendar_service.dart';
 
 class TaskSyncResult {
-  final bool isFullySynced;
-  final String? effectiveUserMessage;
-  final bool notificationSuccess;
-  final bool notificationSkippedPast;
-  final CalendarSyncStatus calendarStatus;
-  final bool isVersionConflict;
+  final bool isNotificationSynced;
+  final bool isCalendarSynced;
+  final String? notificationMessage;
+  final String? calendarMessage;
 
   const TaskSyncResult({
-    required this.isFullySynced,
-    this.effectiveUserMessage,
-    required this.notificationSuccess,
-    this.notificationSkippedPast = false,
-    required this.calendarStatus,
-    this.isVersionConflict = false,
+    required this.isNotificationSynced,
+    required this.isCalendarSynced,
+    this.notificationMessage,
+    this.calendarMessage,
   });
+
+  bool get isFullySynced => isNotificationSynced && isCalendarSynced;
+
+  String? get effectiveUserMessage {
+    if (isFullySynced) return null;
+    List<String> errors = [];
+    if (!isNotificationSynced && notificationMessage != null) {
+      errors.add(notificationMessage!);
+    }
+    if (!isCalendarSynced && calendarMessage != null) {
+      errors.add(calendarMessage!);
+    }
+    return errors.join(" ");
+  }
 }
 
 class TaskSyncCoordinator {
-  static final TaskSyncCoordinator instance = TaskSyncCoordinator._internal();
-  TaskSyncCoordinator._internal();
+  // WP-005 FIX: Per-task paralel sync kilit seti
+  static final Set<String> _activeSyncTaskIds = <String>{};
 
   static Future<TaskSyncResult> coordinateTaskSync({
     required TaskItem task,
     required DateTime targetDate,
   }) async {
-    bool notifSuccess = false;
-    bool notifSkippedPast = false;
-    CalendarSyncStatus calStatus = CalendarSyncStatus.unavailable;
-    String? notifError;
-    String? calError;
-    bool isConflict = false;
-    bool isNetworkOrDbError = false;
+    if (!_activeSyncTaskIds.add(task.id)) {
+      return const TaskSyncResult(
+        isNotificationSynced: true,
+        isCalendarSynced: true,
+        calendarMessage: 'Senkronizasyon zaten sürüyor.',
+      );
+    }
 
-    final int resolvedNotifId =
-        NotificationService.resolveNotificationId(task: task);
-    task.notificationId = resolvedNotifId;
+    try {
+      bool notifSuccess = true;
+      String? notifMsg;
+      int notifId = NotificationService.resolveNotificationId(task: task);
 
-    if (!task.isCompleted) {
-      try {
-        final NotificationScheduleResult scheduleStatus =
-            await NotificationService.scheduleTaskNotification(
+      if (task.isCompleted) {
+        await NotificationService.cancelNotification(notifId);
+        notifMsg = 'Görev tamamlandı, bildirim kaldırıldı.';
+      } else {
+        final notifResult = await NotificationService.scheduleTaskReminder(
           task: task,
           targetDate: targetDate,
         );
+        notifSuccess = notifResult.isScheduled ||
+            notifResult.status ==
+                NotificationScheduleStatus.skippedNoReminder ||
+            notifResult.status == NotificationScheduleStatus.skippedPast;
+        notifMsg = notifResult.message;
+      }
 
-        if (scheduleStatus == NotificationScheduleResult.scheduled) {
-          notifSuccess = true;
-        } else if (scheduleStatus ==
-            NotificationScheduleResult.skippedNoReminder) {
-          notifSuccess = true;
-        } else if (scheduleStatus == NotificationScheduleResult.skippedPast) {
-          notifSkippedPast = true;
-          notifSuccess = false;
-          notifError = 'Görev saati geçmiş olduğu için bildirim kurulmadı.';
+      bool calSuccess = true;
+      String? calMsg;
+      String? externalCalId = task.calendarId;
+      String? externalEventId = task.calendarEventId;
+
+      // WP-006 FIX: Görev tamamlandıysa takvimden sil, aksi halde ekle/güncelle
+      if (task.isCompleted) {
+        if (externalCalId != null && externalEventId != null) {
+          await CalendarService.deleteEvent(externalCalId, externalEventId);
+          externalEventId = null;
+        }
+      } else {
+        final calId = await CalendarService.getDefaultCalendarId();
+        if (calId != null) {
+          externalCalId = calId;
+          final eventId = await CalendarService.addOrUpdateEvent(
+            calendarId: calId,
+            existingEventId: task.calendarEventId,
+            title: task.title,
+            startTime: task.startDateTime,
+            durationMinutes: task.durationMinutes,
+            description:
+                "WeeklyPulse ${task.taskMode == 'student' ? 'Akademik' : 'İş'} Planı",
+          );
+          if (eventId != null) {
+            externalEventId = eventId;
+          } else {
+            calSuccess = false;
+            calMsg = 'Takvim eşitlenemedi.';
+          }
         } else {
-          notifError = 'Bildirim kurulamadı.';
+          calSuccess = false;
+          calMsg = 'Yazılabilir takvim bulunamadı.';
+        }
+      }
+
+      try {
+        final user = supabase.auth.currentUser;
+        if (user != null) {
+          final newStatus = (notifSuccess && calSuccess) ? 'synced' : 'partial';
+          await supabase
+              .from('weekly_tasks')
+              .update({
+                'notification_id': notifId,
+                'calendar_id': externalCalId,
+                'calendar_event_id': externalEventId,
+                'sync_status': newStatus,
+                'last_synced_at': DateTime.now().toIso8601String(),
+              })
+              .eq('id', task.id)
+              .eq('user_id', user.id);
         }
       } catch (e) {
-        debugPrint("Senkronizasyon Bildirim Hatası: $e");
-        notifError = e.toString();
+        debugPrint("Metadata güncelleme hatası: $e");
       }
-    } else {
-      notifSuccess =
-          await NotificationService.cancelNotification(resolvedNotifId);
+
+      return TaskSyncResult(
+        isNotificationSynced: notifSuccess,
+        isCalendarSynced: calSuccess,
+        notificationMessage: notifMsg,
+        calendarMessage: calMsg,
+      );
+    } finally {
+      _activeSyncTaskIds.remove(task.id);
     }
-
-    try {
-      final calId = await CalendarService.getDefaultCalendarId();
-      if (calId == null || calId.isEmpty) {
-        calStatus = CalendarSyncStatus.skippedByUser;
-      } else {
-        task.calendarId = calId;
-
-        final String? eventId = await CalendarService.addOrUpdateEvent(
-          task: task,
-          targetDate: targetDate,
-        );
-
-        if (eventId != null && eventId.isNotEmpty) {
-          task.calendarEventId = eventId;
-          calStatus = CalendarSyncStatus.synced;
-        } else {
-          calStatus = CalendarSyncStatus.failed;
-          calError = 'Takvim etkinliği oluşturulamadı.';
-        }
-      }
-    } catch (e) {
-      debugPrint("Takvim Entegrasyon Hatası: $e");
-      calStatus = CalendarSyncStatus.failed;
-      calError = 'Takvim hatası: $e';
-    }
-
-    final bool calOk = (calStatus == CalendarSyncStatus.synced ||
-        calStatus == CalendarSyncStatus.skippedByUser);
-    final bool isAllSynced = notifSuccess && calOk;
-    final String syncStatus = isAllSynced
-        ? 'synced'
-        : (notifSkippedPast && calOk ? 'partial' : 'failed');
-
-    task.syncStatus = syncStatus;
-
-    try {
-      final user = supabase.auth.currentUser;
-      if (user != null && task.id.isNotEmpty) {
-        final updateResponse = await supabase
-            .from('weekly_tasks')
-            .update({
-              'notification_id': task.notificationId,
-              'calendar_id': task.calendarId,
-              'calendar_event_id': task.calendarEventId,
-              'sync_status': syncStatus,
-              'last_synced_at': DateTime.now().toUtc().toIso8601String(),
-            })
-            .eq('id', task.id)
-            .eq('user_id', user.id)
-            .eq('version', task.version)
-            .select('id')
-            .maybeSingle();
-
-        if (updateResponse == null) {
-          isConflict = true;
-          debugPrint(
-              "UYARI: Sync metadata zero-row update! Task version stale.");
-        }
-      }
-    } catch (e) {
-      debugPrint("Sync Metadata Ağ/Kayıt Hatası: $e");
-      isNetworkOrDbError = true;
-    }
-
-    String? userMsg;
-    if (isConflict) {
-      userMsg = 'Görev başka bir cihazda değiştirilmiş (Versiyon uyuşmazlığı).';
-    } else if (isNetworkOrDbError) {
-      userMsg = 'Senkronizasyon sunucuya yazılamadı (Bağlantı hatası).';
-    } else if (notifSkippedPast) {
-      userMsg = 'Plan kaydedildi (Zamanı geçmiş bildirim planlanmadı).';
-    } else if (!isAllSynced) {
-      userMsg = notifError ?? calError ?? 'Senkronizasyon başarısız oldu.';
-    }
-
-    return TaskSyncResult(
-      isFullySynced: isAllSynced && !isConflict && !isNetworkOrDbError,
-      effectiveUserMessage: userMsg,
-      notificationSuccess: notifSuccess,
-      notificationSkippedPast: notifSkippedPast,
-      calendarStatus: calStatus,
-      isVersionConflict: isConflict,
-    );
   }
 
-  // P0/P1: Hash-protected lease token ve best-effort ack destekli reconcile
   static Future<int> reconcilePendingAndFailedTasks() async {
-    final user = supabase.auth.currentUser;
-    if (user == null) return 0;
-
-    int reconciledCount = 0;
-
+    int reconciled = 0;
     try {
-      final dynamic claimResult = await supabase.rpc(
+      final user = supabase.auth.currentUser;
+      if (user == null) return 0;
+
+      final dynamic claimRes = await supabase.rpc(
         'claim_pending_delete_operations',
         params: {'p_limit': 10, 'p_lease_seconds': 60},
       );
 
-      final List<dynamic> deleteOps = (claimResult is List) ? claimResult : [];
+      if (claimRes is Map &&
+          claimRes['success'] == true &&
+          claimRes['operations'] != null) {
+        final String? leaseToken = claimRes['lease_token'];
+        final List ops = claimRes['operations'] as List;
 
-      for (var op in deleteOps) {
-        final desired = op['desired_state'] as Map<String, dynamic>?;
-        final String? leaseToken = op['lease_token'] as String?;
+        for (var op in ops) {
+          final opId = op['id'];
+          final desiredState = op['desired_state'] as Map?;
+          final notifId = desiredState?['notification_id'];
+          final calId = desiredState?['calendar_id'];
+          final calEventId = desiredState?['calendar_event_id'];
 
-        if (desired != null && leaseToken != null && leaseToken.isNotEmpty) {
-          final notifId = desired['notification_id'] as int?;
-          final calId = desired['calendar_id'] as String?;
-          final eventId = desired['calendar_event_id'] as String?;
+          String notifStatus = 'skipped';
+          if (notifId != null && notifId is int) {
+            await NotificationService.cancelNotification(notifId);
+            notifStatus = 'best_effort_client_ack';
+          }
 
-          String notifStatus = (notifId == null) ? 'skipped' : 'failed';
-          String calStatus =
-              (eventId == null || eventId.isEmpty) ? 'skipped' : 'failed';
+          String calStatus = 'skipped';
           String? verifiedEventId;
-          String? errorMessage;
-
-          // P0: Bildirim için best_effort_client_ack semantiği
-          if (notifId != null) {
-            final bool cancelled =
-                await NotificationService.cancelNotification(notifId);
-            if (cancelled) {
-              notifStatus = 'best_effort_client_ack';
-            } else {
-              notifStatus = 'failed';
-              errorMessage = "Bildirim iptal edilemedi.";
-            }
+          if (calId != null && calEventId != null) {
+            final deleted = await CalendarService.deleteEvent(
+                calId.toString(), calEventId.toString());
+            calStatus = deleted ? 'provider_verified' : 'provider_not_found';
+            verifiedEventId = deleted ? calEventId.toString() : 'not_found';
           }
 
-          // Takvim temizliği ve doğrulaması
-          if (calId != null && eventId != null && eventId.isNotEmpty) {
-            try {
-              final ok = await CalendarService.deleteEvent(calId, eventId);
-              if (ok) {
-                calStatus = 'provider_verified';
-                verifiedEventId = eventId;
-              } else {
-                calStatus = 'failed';
-                errorMessage = (errorMessage != null)
-                    ? "$errorMessage; Takvim silme başarısız"
-                    : "Takvim silme başarısız";
-              }
-            } catch (e) {
-              calStatus = 'failed';
-              errorMessage = (errorMessage != null)
-                  ? "$errorMessage; Takvim hatası: $e"
-                  : "Takvim hatası: $e";
-            }
-          }
-
-          try {
-            final res =
-                await supabase.rpc('report_delete_side_effects', params: {
-              'p_operation_id': op['id'],
+          if (leaseToken != null) {
+            await supabase.rpc('report_delete_side_effects', params: {
+              'p_operation_id': opId,
               'p_lease_token': leaseToken,
               'p_notification_status': notifStatus,
               'p_calendar_status': calStatus,
               'p_verified_event_id': verifiedEventId,
-              'p_error_message': errorMessage,
             });
-
-            if (res is Map && res['status'] == 'completed') {
-              reconciledCount++;
-            }
-          } catch (rpcErr) {
-            debugPrint("Delete Side Effect Raporlama Hatası: $rpcErr");
+            reconciled++;
           }
         }
       }
     } catch (e) {
-      debugPrint("Durable Delete Claim Hatası: $e");
+      debugPrint("Reconciliation hatası: $e");
     }
-
-    try {
-      final res = await supabase
-          .from('weekly_tasks')
-          .select()
-          .eq('user_id', user.id)
-          .neq('sync_status', 'synced')
-          .limit(15);
-
-      for (var row in res) {
-        final task = TaskItem.fromJson(row);
-        final date =
-            DateTime.tryParse(task.scheduledDate ?? '') ?? DateTime.now();
-        final syncRes = await coordinateTaskSync(task: task, targetDate: date);
-        if (syncRes.isFullySynced) {
-          reconciledCount++;
-        }
-      }
-    } catch (e) {
-      debugPrint("Outbox Reconcile Hatası: $e");
-    }
-    return reconciledCount;
-  }
-
-  void triggerSync() {
-    reconcilePendingAndFailedTasks();
+    return reconciled;
   }
 }
 
@@ -1696,7 +1642,6 @@ import '../../application/planning_engine.dart';
 import '../../application/recovery_engine.dart';
 import '../../application/task_sync_coordinator.dart';
 import '../widgets/task_card.dart';
-import 'auth_screen.dart';
 
 enum ViewMode { daily, weekly, monthly }
 
@@ -1712,9 +1657,6 @@ class TaskMoveResult {
   bool get isBusy => status == TaskMoveStatus.busy;
   bool get isConflict => status == TaskMoveStatus.conflict;
 }
-
-Function(String taskId)? onGlobalNotificationFocus;
-String? globalPendingNotificationTaskId;
 
 class WeeklyPlannerScreen extends StatefulWidget {
   final bool isDark;
@@ -1756,6 +1698,8 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
 
   List<TaskItem> allFetchedTasks = [];
   List<TaskItem> allMonthFetchedTasks = [];
+  // WP-031 FIX: Aylık takvim için O(1) arama haritası
+  Map<String, List<TaskItem>> _monthTasksByDate = {};
 
   String _formatDateToKey(DateTime date) {
     return "${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}";
@@ -1783,9 +1727,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
 
   Future<bool> focusOnTaskById(String taskId) async {
     final user = supabase.auth.currentUser;
-    if (user == null) {
-      return false;
-    }
+    if (user == null) return false;
 
     TaskItem? targetTask = allFetchedTasks.firstWhere((t) => t.id == taskId,
         orElse: () => allMonthFetchedTasks.firstWhere((t) => t.id == taskId,
@@ -1844,7 +1786,8 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
     selectedDayIndex = now.weekday - 1;
     selectedCalendarDay = DateTime(now.year, now.month, now.day);
 
-    onGlobalNotificationFocus = (taskId) {
+    // WP-009 FIX: Bildirim tıklama olayını dinle
+    onGlobalNotificationPayloadReceived = (taskId) {
       if (mounted) {
         focusOnTaskById(taskId);
       }
@@ -1866,20 +1809,11 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
         );
       }
     });
-
-    WidgetsBinding.instance.addPostFrameCallback((_) async {
-      if (globalPendingNotificationTaskId != null) {
-        final success = await focusOnTaskById(globalPendingNotificationTaskId!);
-        if (success) {
-          globalPendingNotificationTaskId = null;
-        }
-      }
-    });
   }
 
   @override
   void dispose() {
-    onGlobalNotificationFocus = null;
+    onGlobalNotificationPayloadReceived = null;
     _confettiController.dispose();
     super.dispose();
   }
@@ -1887,10 +1821,19 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
   void _loadPreferences() async {
     final prefs = await SharedPreferences.getInstance();
     final savedMode = prefs.getString('active_mode');
-    if (savedMode != null && mounted) {
-      setState(() {
-        activeMode = savedMode;
-      });
+    // WP-019 FIX: Mod allowlist kontrolü
+    if (savedMode != null && (savedMode == 'student' || savedMode == 'pro')) {
+      if (mounted) {
+        setState(() {
+          activeMode = savedMode;
+        });
+      }
+    } else {
+      if (mounted) {
+        setState(() {
+          activeMode = 'student';
+        });
+      }
     }
   }
 
@@ -1950,9 +1893,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
     }
 
     if (busiestDay == -1 || maxScore < 60 || lightestDay == busiestDay) {
-      if (!mounted) {
-        return;
-      }
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('✨ Haftalık planın zaten dengeli görünüyor!'),
@@ -2001,9 +1942,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
     }
 
     if (candidateTask == null) {
-      if (!mounted) {
-        return;
-      }
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
             content: Text(
@@ -2068,9 +2007,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                 final scaffoldMessenger = ScaffoldMessenger.of(context);
                 Navigator.pop(dialogContext);
                 final result = await _moveTaskToNewDay(targetTask, lightestDay);
-                if (!mounted) {
-                  return;
-                }
+                if (!mounted) return;
 
                 if (result.isSuccess) {
                   _confettiController.play();
@@ -2285,19 +2222,8 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                       icon: const Icon(Icons.logout),
                       label: const Text('Hesaptan Çıkış Yap'),
                       onPressed: () async {
-                        final navigator = Navigator.of(context);
+                        Navigator.pop(modalContext);
                         await supabase.auth.signOut();
-                        if (!mounted) {
-                          return;
-                        }
-                        navigator.pushReplacement(
-                          MaterialPageRoute(
-                            builder: (_) => AuthScreen(
-                              onThemeToggle: widget.onThemeToggle,
-                              isDark: widget.isDark,
-                            ),
-                          ),
-                        );
                       },
                     ),
                   ),
@@ -2379,7 +2305,6 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                       ? null
                       : () async {
                           final messenger = ScaffoldMessenger.of(context);
-                          final nav = Navigator.of(context);
                           final dialogNav = Navigator.of(dialogContext);
 
                           final pwd = passwordController.text;
@@ -2419,12 +2344,19 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                           }
 
                           try {
+                            // WP-012 FIX: Kullanıcının geçmiş/gelecek tüm takvim event'lerini çekip sil
                             try {
-                              for (var t in allFetchedTasks) {
-                                if (t.calendarId != null &&
-                                    t.calendarEventId != null) {
-                                  await CalendarService.deleteEvent(
-                                      t.calendarId!, t.calendarEventId!);
+                              final dynamic calEventsRes = await supabase
+                                  .rpc('get_all_user_calendar_events');
+                              if (calEventsRes is List) {
+                                for (var ev in calEventsRes) {
+                                  final cid = ev['calendar_id']?.toString();
+                                  final ceid =
+                                      ev['calendar_event_id']?.toString();
+                                  if (cid != null && ceid != null) {
+                                    await CalendarService.deleteEvent(
+                                        cid, ceid);
+                                  }
                                 }
                               }
                             } catch (_) {}
@@ -2444,18 +2376,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                               } catch (_) {}
 
                               await supabase.auth.signOut();
-                              if (!mounted) return;
                               if (dialogContext.mounted) {
                                 dialogNav.pop();
                               }
-                              nav.pushReplacement(
-                                MaterialPageRoute(
-                                  builder: (_) => AuthScreen(
-                                    onThemeToggle: widget.onThemeToggle,
-                                    isDark: widget.isDark,
-                                  ),
-                                ),
-                              );
                               messenger.showSnackBar(
                                 const SnackBar(
                                     content: Text(
@@ -2593,9 +2516,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
     try {
       final dynamic quotaRes = await supabase.rpc(
         'consume_ai_quota',
-        params: {
-          'p_request_id': requestId,
-        },
+        params: {'p_request_id': requestId},
       );
 
       if (quotaRes is! Map || quotaRes['success'] != true) {
@@ -2878,13 +2799,51 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
     );
   }
 
+  void _showPricingModal() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+      builder: (modalContext) {
+        return Container(
+          padding: const EdgeInsets.all(24),
+          height: MediaQuery.of(context).size.height * 0.85,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Center(
+                  child: Text('WeeklyPulse Elit Kulüp 👑',
+                      style: TextStyle(
+                          fontSize: 22, fontWeight: FontWeight.bold))),
+              const SizedBox(height: 20),
+              _buildPricingCard(
+                title: '🎓 SCHOLAR (Öğrenci Kulübü)',
+                monthlyPrice: '99.99 TL / ay',
+                yearlyPrice: '999.99 TL / yıl (2 Ay Bedava)',
+                tierCode: 'Scholar 🎓',
+                color: const Color(0xFF4A55A2),
+              ),
+              const SizedBox(height: 12),
+              _buildPricingCard(
+                title: '💼 EXECUTIVE (İş Kulübü)',
+                monthlyPrice: '99.99 TL / ay',
+                yearlyPrice: '999.99 TL / yıl (2 Ay Bedava)',
+                tierCode: 'Executive 👑',
+                color: const Color(0xFF1E293B),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
   Widget _buildPricingCard({
     required String title,
     required String monthlyPrice,
     required String yearlyPrice,
     required String tierCode,
-    required String monthlyPlanId,
-    required String yearlyPlanId,
     required Color color,
   }) {
     return Container(
@@ -2910,8 +2869,16 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
               ElevatedButton(
                 style: ElevatedButton.styleFrom(
                     backgroundColor: color, minimumSize: const Size(80, 30)),
-                onPressed: () =>
-                    _handleStorePurchase(tierCode, monthlyPlanId, false),
+                onPressed: () {
+                  Navigator.pop(context);
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text(
+                          '👑 $tierCode üyeliği mağaza sürümünde aktif edilecektir.'),
+                      backgroundColor: const Color(0xFF7895CB),
+                    ),
+                  );
+                },
                 child: const Text('Katıl (Demo)',
                     style: TextStyle(color: Colors.white, fontSize: 11)),
               )
@@ -2930,70 +2897,22 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                 style: ElevatedButton.styleFrom(
                     backgroundColor: Colors.green,
                     minimumSize: const Size(80, 30)),
-                onPressed: () =>
-                    _handleStorePurchase(tierCode, yearlyPlanId, true),
+                onPressed: () {
+                  Navigator.pop(context);
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text(
+                          '👑 $tierCode üyeliği mağaza sürümünde aktif edilecektir.'),
+                      backgroundColor: const Color(0xFF7895CB),
+                    ),
+                  );
+                },
                 child: const Text('Yıllık (Demo)',
                     style: TextStyle(color: Colors.white, fontSize: 11)),
               )
             ],
           ),
         ],
-      ),
-    );
-  }
-
-  void _showPricingModal() {
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
-      builder: (modalContext) {
-        return Container(
-          padding: const EdgeInsets.all(24),
-          height: MediaQuery.of(context).size.height * 0.85,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Center(
-                  child: Text('WeeklyPulse Elit Kulüp 👑',
-                      style: TextStyle(
-                          fontSize: 22, fontWeight: FontWeight.bold))),
-              const SizedBox(height: 20),
-              _buildPricingCard(
-                title: '🎓 SCHOLAR (Öğrenci Kulübü)',
-                monthlyPrice: '99.99 TL / ay',
-                yearlyPrice: '999.99 TL / yıl (2 Ay Bedava)',
-                tierCode: 'Scholar 🎓',
-                monthlyPlanId: 'scholar_monthly',
-                yearlyPlanId: 'scholar_yearly',
-                color: const Color(0xFF4A55A2),
-              ),
-              const SizedBox(height: 12),
-              _buildPricingCard(
-                title: '💼 EXECUTIVE (İş Kulübü)',
-                monthlyPrice: '99.99 TL / ay',
-                yearlyPrice: '999.99 TL / yıl (2 Ay Bedava)',
-                tierCode: 'Executive 👑',
-                monthlyPlanId: 'executive_monthly',
-                yearlyPlanId: 'executive_yearly',
-                color: const Color(0xFF1E293B),
-              ),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  void _handleStorePurchase(String tierName, String planId, bool isYearly) {
-    if (!mounted) return;
-    Navigator.pop(context);
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content:
-            Text('👑 $tierName üyeliği mağaza sürümünde aktif edilecektir.'),
-        backgroundColor: const Color(0xFF7895CB),
       ),
     );
   }
@@ -3024,9 +2943,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
 
     if (targetWeekday != -1) {
       int diff = targetWeekday - todayMidnight.weekday;
-      if (diff <= 0) {
-        diff += 7;
-      }
+      if (diff <= 0) diff += 7;
       targetDate = todayMidnight.add(Duration(days: diff));
     } else if (RegExp(r'\byarın\b').hasMatch(lower)) {
       targetDate = todayMidnight.add(const Duration(days: 1));
@@ -3325,6 +3242,25 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                       ),
                     ),
                     const SizedBox(height: 12),
+                    // WP-034: Gün değiştirme seçeneği
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Text('Planlanan Gün:',
+                            style: TextStyle(fontWeight: FontWeight.bold)),
+                        DropdownButton<int>(
+                          value: targetDay,
+                          items: List.generate(
+                              7,
+                              (idx) => DropdownMenuItem(
+                                  value: idx, child: Text(fullWeekDays[idx]))),
+                          onChanged: (v) {
+                            if (v != null) setStateModal(() => targetDay = v);
+                          },
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
@@ -3424,11 +3360,10 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                     now.add(const Duration(days: 730));
 
                                 DateTime initialDate = selectedDeadline ?? now;
-                                if (initialDate.isBefore(firstDate)) {
+                                if (initialDate.isBefore(firstDate))
                                   initialDate = firstDate;
-                                } else if (initialDate.isAfter(lastDate)) {
+                                if (initialDate.isAfter(lastDate))
                                   initialDate = lastDate;
-                                }
 
                                 final DateTime? pickedDate =
                                     await showDatePicker(
@@ -3438,10 +3373,8 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                   lastDate: lastDate,
                                 );
 
-                                if (pickedDate == null ||
-                                    !modalContext.mounted) {
+                                if (pickedDate == null || !modalContext.mounted)
                                   return;
-                                }
 
                                 final TimeOfDay? pickedTime =
                                     await showTimePicker(
@@ -3497,9 +3430,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                             ? null
                             : () async {
                                 final newTitle = titleController.text.trim();
-                                if (newTitle.isEmpty) {
-                                  return;
-                                }
+                                if (newTitle.isEmpty) return;
 
                                 final newDate = currentWeekMonday
                                     .add(Duration(days: targetDay));
@@ -3536,6 +3467,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                 final derivedDayIndex = newDate.weekday - 1;
 
                                 try {
+                                  // WP-014 FIX: p_expected_version zorunlu kılındı
                                   final res = await supabase.rpc(
                                     'save_task_mutation',
                                     params: {
@@ -3550,11 +3482,11 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                       'p_task_time': formattedTime,
                                       'p_duration_minutes': selectedDuration,
                                       'p_priority': selectedPriority,
+                                      'p_expected_version': task.version,
                                       'p_deadline':
                                           selectedDeadline?.toIso8601String(),
                                       'p_reminder_time': selectedReminder,
                                       'p_is_completed': task.isCompleted,
-                                      'p_expected_version': task.version,
                                       'p_request_id':
                                           'mutation_${task.id}_${task.version + 1}',
                                     },
@@ -3586,9 +3518,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                       targetDate: newDate,
                                     );
 
-                                    if (!mounted) {
-                                      return;
-                                    }
+                                    if (!mounted) return;
 
                                     _fetchTasks();
                                     _fetchAllTasksForMonth(focusedCalendarDay);
@@ -3607,9 +3537,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                     final errCode =
                                         (res is Map) ? res['code'] : null;
                                     if (errCode == 'VERSION_CONFLICT') {
-                                      if (modalContext.mounted) {
-                                        modalNav.pop();
-                                      }
+                                      if (modalContext.mounted) modalNav.pop();
                                       scaffoldMessenger.showSnackBar(
                                         const SnackBar(
                                           content: Text(
@@ -3620,10 +3548,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                       _fetchTasks();
                                       return;
                                     }
-                                    final errMsg = (res is Map)
+                                    throw Exception(res is Map
                                         ? res['message']
-                                        : 'Güncelleme sunucu tarafından reddedildi.';
-                                    throw Exception(errMsg);
+                                        : 'Güncelleme sunucu tarafından reddedildi.');
                                   }
                                 } catch (e) {
                                   debugPrint("Görev Güncelleme Hatası: $e");
@@ -3631,9 +3558,8 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                     setStateModal(() => isEditSaving = false);
                                     scaffoldMessenger.showSnackBar(
                                       SnackBar(
-                                        content: Text('Hata: $e'),
-                                        backgroundColor: Colors.redAccent,
-                                      ),
+                                          content: Text('Hata: $e'),
+                                          backgroundColor: Colors.redAccent),
                                     );
                                   }
                                 }
@@ -3827,11 +3753,10 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                     now.add(const Duration(days: 730));
 
                                 DateTime initialDate = selectedDeadline ?? now;
-                                if (initialDate.isBefore(firstDate)) {
+                                if (initialDate.isBefore(firstDate))
                                   initialDate = firstDate;
-                                } else if (initialDate.isAfter(lastDate)) {
+                                if (initialDate.isAfter(lastDate))
                                   initialDate = lastDate;
-                                }
 
                                 final DateTime? pickedDate =
                                     await showDatePicker(
@@ -3841,10 +3766,8 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                   lastDate: lastDate,
                                 );
 
-                                if (pickedDate == null ||
-                                    !modalContext.mounted) {
+                                if (pickedDate == null || !modalContext.mounted)
                                   return;
-                                }
 
                                 final TimeOfDay? pickedTime =
                                     await showTimePicker(
@@ -3961,10 +3884,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                   if (rpcRes is! Map ||
                                       rpcRes['success'] != true ||
                                       rpcRes['task'] == null) {
-                                    final err = (rpcRes is Map)
+                                    throw Exception(rpcRes is Map
                                         ? rpcRes['message']
-                                        : 'Sunucu geçersiz yanıt verdi.';
-                                    throw Exception(err ?? 'Kayıt başarısız.');
+                                        : 'Kayıt başarısız.');
                                   }
 
                                   final TaskItem createdTask =
@@ -3988,10 +3910,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                       ScaffoldMessenger.of(context)
                                           .showSnackBar(
                                         const SnackBar(
-                                          content: Text(
-                                              '✨ Görev eklendi ve eşitlendi!'),
-                                          backgroundColor: Colors.green,
-                                        ),
+                                            content: Text(
+                                                '✨ Görev eklendi ve eşitlendi!'),
+                                            backgroundColor: Colors.green),
                                       );
                                     } else {
                                       final msg =
@@ -4000,10 +3921,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                       ScaffoldMessenger.of(context)
                                           .showSnackBar(
                                         SnackBar(
-                                          content:
-                                              Text('⚠️ Görev eklendi: $msg'),
-                                          backgroundColor: Colors.orange,
-                                        ),
+                                            content:
+                                                Text('⚠️ Görev eklendi: $msg'),
+                                            backgroundColor: Colors.orange),
                                       );
                                     }
                                   }
@@ -4050,9 +3970,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
     });
     try {
       final user = supabase.auth.currentUser;
-      if (user == null) {
-        return;
-      }
+      if (user == null) return;
 
       final response = await supabase
           .from('weekly_tasks')
@@ -4062,9 +3980,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
           .order('scheduled_date', ascending: true)
           .order('task_time', ascending: true);
 
-      if (generation != _fetchGeneration) {
-        return;
-      }
+      if (generation != _fetchGeneration) return;
 
       List<TaskItem> loaded = [];
       for (var row in response) {
@@ -4096,9 +4012,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
     final int gen = ++_monthFetchGeneration;
     try {
       final user = supabase.auth.currentUser;
-      if (user == null) {
-        return;
-      }
+      if (user == null) return;
 
       final firstDay = DateTime(monthDate.year, monthDate.month - 1, 20);
       final lastDay = DateTime(monthDate.year, monthDate.month + 1, 10);
@@ -4115,12 +4029,20 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
       if (gen != _monthFetchGeneration) return;
 
       List<TaskItem> loaded = [];
+      Map<String, List<TaskItem>> grouped = {};
       for (var row in response) {
-        loaded.add(TaskItem.fromJson(row));
+        final t = TaskItem.fromJson(row);
+        loaded.add(t);
+        if (t.scheduledDate != null) {
+          grouped.putIfAbsent(t.scheduledDate!, () => []).add(t);
+        }
       }
 
       if (mounted) {
-        setState(() => allMonthFetchedTasks = loaded);
+        setState(() {
+          allMonthFetchedTasks = loaded;
+          _monthTasksByDate = grouped;
+        });
       }
     } catch (e) {
       debugPrint("Ay Görevleri Çekme Hatası: $e");
@@ -4159,10 +4081,10 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
           'p_task_time': task.taskTime,
           'p_duration_minutes': task.durationMinutes,
           'p_priority': task.priority,
+          'p_expected_version': task.version,
           'p_deadline': task.deadline?.toIso8601String(),
           'p_reminder_time': task.reminderTime,
           'p_is_completed': task.isCompleted,
-          'p_expected_version': task.version,
           'p_request_id': 'move_${task.id}_${task.version + 1}',
         },
       );
@@ -4172,14 +4094,12 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
         _movingTaskIds.remove(task.id);
         if (code == 'VERSION_CONFLICT') {
           return const TaskMoveResult(
-            status: TaskMoveStatus.conflict,
-            message: 'Görev başka bir cihazda değiştirilmiş.',
-          );
+              status: TaskMoveStatus.conflict,
+              message: 'Görev başka bir cihazda değiştirilmiş.');
         }
         return const TaskMoveResult(
-          status: TaskMoveStatus.failed,
-          message: 'Görev veritabanında güncellenemedi.',
-        );
+            status: TaskMoveStatus.failed,
+            message: 'Görev veritabanında güncellenemedi.');
       }
 
       setState(() {
@@ -4271,8 +4191,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                       });
                     }
                   } else {
-                    final err = (res is Map) ? res['message'] : null;
-                    throw Exception(err ?? 'Silme işlemi başarısız.');
+                    throw Exception(res is Map
+                        ? res['message']
+                        : 'Silme işlemi başarısız.');
                   }
                 } catch (e) {
                   debugPrint("Veritabanı Silme Hatası: $e");
@@ -4332,10 +4253,10 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
           'p_task_time': task.taskTime,
           'p_duration_minutes': task.durationMinutes,
           'p_priority': task.priority,
+          'p_expected_version': task.version,
           'p_deadline': task.deadline?.toIso8601String(),
           'p_reminder_time': task.reminderTime,
           'p_is_completed': isCompleted,
-          'p_expected_version': task.version,
           'p_request_id': 'complete_${task.id}_${task.version + 1}',
         },
       );
@@ -4346,14 +4267,13 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
         final notifId = NotificationService.resolveNotificationId(task: task);
         if (isCompleted) {
           await NotificationService.cancelNotification(notifId);
-        } else {
-          final targetDate =
-              DateTime.tryParse(task.scheduledDate ?? '') ?? DateTime.now();
-          await TaskSyncCoordinator.coordinateTaskSync(
-            task: task,
-            targetDate: targetDate,
-          );
         }
+        final targetDate =
+            DateTime.tryParse(task.scheduledDate ?? '') ?? DateTime.now();
+        await TaskSyncCoordinator.coordinateTaskSync(
+          task: task,
+          targetDate: targetDate,
+        );
       } else {
         final code = (res is Map) ? res['code'] : null;
         if (code == 'VERSION_CONFLICT') {
@@ -4496,11 +4416,10 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                         const Icon(Icons.wifi_off,
                             size: 48, color: Colors.grey),
                         const SizedBox(height: 12),
-                        Text(
-                          _taskFetchError!,
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(fontWeight: FontWeight.bold),
-                        ),
+                        Text(_taskFetchError!,
+                            textAlign: TextAlign.center,
+                            style:
+                                const TextStyle(fontWeight: FontWeight.bold)),
                         const SizedBox(height: 16),
                         ElevatedButton.icon(
                           onPressed: _fetchTasks,
@@ -4537,16 +4456,13 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                   borderRadius: BorderRadius.circular(12),
                                 ),
                                 child: Center(
-                                  child: Text(
-                                    '🎓 Öğrenci Modu',
-                                    style: TextStyle(
-                                      color: isStudent
-                                          ? Colors.white
-                                          : Colors.grey,
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 12,
-                                    ),
-                                  ),
+                                  child: Text('🎓 Öğrenci Modu',
+                                      style: TextStyle(
+                                          color: isStudent
+                                              ? Colors.white
+                                              : Colors.grey,
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 12)),
                                 ),
                               ),
                             ),
@@ -4565,16 +4481,13 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                   borderRadius: BorderRadius.circular(12),
                                 ),
                                 child: Center(
-                                  child: Text(
-                                    '💼 Pro / İş Modu',
-                                    style: TextStyle(
-                                      color: !isStudent
-                                          ? Colors.white
-                                          : Colors.grey,
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 12,
-                                    ),
-                                  ),
+                                  child: Text('💼 Pro / İş Modu',
+                                      style: TextStyle(
+                                          color: !isStudent
+                                              ? Colors.white
+                                              : Colors.grey,
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 12)),
                                 ),
                               ),
                             ),
@@ -4820,27 +4733,24 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                     if (result.isBusy) {
                       scaffoldMessenger.showSnackBar(
                         const SnackBar(
-                          content:
-                              Text('⏳ Görev taşıma işlemi zaten devam ediyor.'),
-                          backgroundColor: Colors.blueGrey,
-                        ),
+                            content: Text(
+                                '⏳ Görev taşıma işlemi zaten devam ediyor.'),
+                            backgroundColor: Colors.blueGrey),
                       );
                     } else if (result.isConflict) {
                       scaffoldMessenger.showSnackBar(
                         const SnackBar(
-                          content: Text(
-                              '⚠️ Bu görev başka bir cihazda değiştirilmiş.'),
-                          backgroundColor: Colors.redAccent,
-                        ),
+                            content: Text(
+                                '⚠️ Bu görev başka bir cihazda değiştirilmiş.'),
+                            backgroundColor: Colors.redAccent),
                       );
                       _fetchTasks();
                     } else if (!result.isSuccess) {
                       scaffoldMessenger.showSnackBar(
                         SnackBar(
-                          content: Text(result.message ??
-                              '⚠️ Görev taşındı fakat tam senkronize edilemedi.'),
-                          backgroundColor: Colors.orange,
-                        ),
+                            content: Text(result.message ??
+                                '⚠️ Görev taşındı fakat tam senkronize edilemedi.'),
+                            backgroundColor: Colors.orange),
                       );
                     }
                   },
@@ -4904,10 +4814,11 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
 
   Widget _buildMonthlyCalendarView(Color primaryColor) {
     final String selectedDateKey = _formatDateToKey(selectedCalendarDay);
-    final List<TaskItem> tasksForSelectedDay = allMonthFetchedTasks
-        .where((t) =>
-            t.taskMode == activeMode && t.scheduledDate == selectedDateKey)
-        .toList();
+    // WP-031 FIX: O(1) harita tabanlı arama
+    final List<TaskItem> tasksForSelectedDay =
+        (_monthTasksByDate[selectedDateKey] ?? [])
+            .where((t) => t.taskMode == activeMode)
+            .toList();
 
     return Column(
       children: [
@@ -4936,9 +4847,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
             ),
             calendarBuilders: CalendarBuilders(
               markerBuilder: (context, day, events) {
-                if (events.isEmpty) {
-                  return null;
-                }
+                if (events.isEmpty) return null;
                 return Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: events.take(4).map((event) {
@@ -4981,11 +4890,11 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
               });
               _fetchTasks();
             },
+            // WP-031 FIX: Her hücre için O(1) arama
             eventLoader: (day) {
               final dateStr = _formatDateToKey(day);
-              return allMonthFetchedTasks
-                  .where((t) =>
-                      t.taskMode == activeMode && t.scheduledDate == dateStr)
+              return (_monthTasksByDate[dateStr] ?? [])
+                  .where((t) => t.taskMode == activeMode)
                   .toList();
             },
           ),
@@ -5009,16 +4918,13 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                   final scaffoldMessenger = ScaffoldMessenger.of(context);
                   final res = await TaskSyncCoordinator.coordinateTaskSync(
                       task: task, targetDate: d);
-                  if (!mounted) {
-                    return;
-                  }
+                  if (!mounted) return;
                   _fetchTasks();
                   final syncMsg = res.isFullySynced
                       ? '✨ Görev eşitlendi!'
                       : '⚠️ Eşitleme kısmi: ${res.effectiveUserMessage ?? 'Senkronizasyon tamamlanamadı.'}';
-                  scaffoldMessenger.showSnackBar(
-                    SnackBar(content: Text(syncMsg)),
-                  );
+                  scaffoldMessenger
+                      .showSnackBar(SnackBar(content: Text(syncMsg)));
                 },
               );
             },
@@ -5091,48 +4997,38 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                       activeTasks: activeTasks,
                     );
 
-                    if (!mounted) {
-                      return;
-                    }
+                    if (!mounted) return;
                     _fetchTasks();
                     _fetchAllTasksForMonth(focusedCalendarDay);
 
                     List<String> outcomeParts = [];
-                    if (res.successCount > 0) {
+                    if (res.successCount > 0)
                       outcomeParts.add('${res.successCount} tam başarıyla');
-                    }
-                    if (res.partialSyncCount > 0) {
+                    if (res.partialSyncCount > 0)
                       outcomeParts
                           .add('${res.partialSyncCount} kısmi eşitlemeyle');
-                    }
-                    if (res.skippedConflictCount > 0) {
+                    if (res.skippedConflictCount > 0)
                       outcomeParts.add(
                           '${res.skippedConflictCount} çakışma nedeniyle atlandı');
-                    }
-                    if (res.skippedDeadlineCount > 0) {
+                    if (res.skippedDeadlineCount > 0)
                       outcomeParts
                           .add('${res.skippedDeadlineCount} deadline aşımı');
-                    }
-                    if (res.databaseUpdateFailedCount > 0) {
+                    if (res.databaseUpdateFailedCount > 0)
                       outcomeParts.add(
                           '${res.databaseUpdateFailedCount} veritabanı hatası');
-                    }
-                    if (res.databaseReadFailedCount > 0) {
+                    if (res.databaseReadFailedCount > 0)
                       outcomeParts
                           .add('${res.databaseReadFailedCount} okuma hatası');
-                    }
-                    if (res.syncFailedCount > 0) {
+                    if (res.syncFailedCount > 0)
                       outcomeParts
                           .add('${res.syncFailedCount} senkronizasyon hatası');
-                    }
 
                     final summaryText = outcomeParts.isEmpty
                         ? 'Kurtarılacak uygun plan bulunamadı.'
                         : '⚡ Plan Kurtarma Özeti: ${outcomeParts.join(", ")}.';
 
-                    scaffoldMessenger.showSnackBar(
-                      SnackBar(content: Text(summaryText)),
-                    );
+                    scaffoldMessenger
+                        .showSnackBar(SnackBar(content: Text(summaryText)));
                   },
                   child: const Text('Toparla ⚡',
                       style: TextStyle(
@@ -5210,16 +5106,13 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                     final scaffoldMessenger = ScaffoldMessenger.of(context);
                     final res = await TaskSyncCoordinator.coordinateTaskSync(
                         task: task, targetDate: d);
-                    if (!mounted) {
-                      return;
-                    }
+                    if (!mounted) return;
                     _fetchTasks();
                     final syncMsg = res.isFullySynced
                         ? '✨ Görev eşitlendi!'
                         : '⚠️ Eşitleme kısmi: ${res.effectiveUserMessage ?? 'Senkronizasyon tamamlanamadı.'}';
-                    scaffoldMessenger.showSnackBar(
-                      SnackBar(content: Text(syncMsg)),
-                    );
+                    scaffoldMessenger
+                        .showSnackBar(SnackBar(content: Text(syncMsg)));
                   },
                 ),
               );
@@ -5293,16 +5186,13 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                       final scaffoldMessenger = ScaffoldMessenger.of(context);
                       final res = await TaskSyncCoordinator.coordinateTaskSync(
                           task: task, targetDate: d);
-                      if (!mounted) {
-                        return;
-                      }
+                      if (!mounted) return;
                       _fetchTasks();
                       final syncMsg = res.isFullySynced
                           ? '✨ Görev eşitlendi!'
                           : '⚠️ Eşitleme kısmi: ${res.effectiveUserMessage ?? 'Senkronizasyon tamamlanamadı.'}';
-                      scaffoldMessenger.showSnackBar(
-                        SnackBar(content: Text(syncMsg)),
-                      );
+                      scaffoldMessenger
+                          .showSnackBar(SnackBar(content: Text(syncMsg)));
                     },
                   )),
             const Divider(height: 16),
@@ -5369,9 +5259,7 @@ class _VoiceInputBottomSheetState extends State<VoiceInputBottomSheet> {
         onError: (e) => debugPrint('STT Hata: $e'),
         onStatus: (s) => debugPrint('STT Durum: $s'),
       );
-      if (mounted) {
-        setState(() => _speechAvailable = available);
-      }
+      if (mounted) setState(() => _speechAvailable = available);
     } catch (_) {}
   }
 
@@ -5409,13 +5297,9 @@ class _VoiceInputBottomSheetState extends State<VoiceInputBottomSheet> {
 
   Future<void> _safeClose() async {
     try {
-      if (_speech.isListening) {
-        await _speech.stop();
-      }
+      if (_speech.isListening) await _speech.stop();
     } catch (_) {}
-    if (mounted) {
-      Navigator.of(context).pop();
-    }
+    if (mounted) Navigator.of(context).pop();
   }
 
   @override
@@ -5477,11 +5361,8 @@ class _VoiceInputBottomSheetState extends State<VoiceInputBottomSheet> {
                       _isListening ? Colors.redAccent : const Color(0xFF7895CB),
                   shape: BoxShape.circle,
                 ),
-                child: Icon(
-                  _isListening ? Icons.mic : Icons.mic_none,
-                  color: Colors.white,
-                  size: 36,
-                ),
+                child: Icon(_isListening ? Icons.mic : Icons.mic_none,
+                    color: Colors.white, size: 36),
               ),
             ),
             const SizedBox(height: 16),
