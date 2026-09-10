@@ -1,6 +1,6 @@
 import 'package:flutter/foundation.dart';
-import '../../core/constants.dart';
-import '../../domain/models/task_item.dart';
+import '../core/constants.dart';
+import '../domain/models/task_item.dart';
 import 'planning_engine.dart';
 import 'task_sync_coordinator.dart';
 
@@ -22,16 +22,11 @@ class TaskRecoveryResult {
     this.databaseReadFailedCount = 0,
     this.syncFailedCount = 0,
   });
-
-  bool get hasAnyFailure =>
-      databaseUpdateFailedCount > 0 ||
-      databaseReadFailedCount > 0 ||
-      syncFailedCount > 0;
 }
 
 class RecoveryEngine {
-  static String formatDateToKey(DateTime date) {
-    return "${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}";
+  static String _formatDate(DateTime d) {
+    return "${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}";
   }
 
   static Future<TaskRecoveryResult> recoverMissedTasks({
@@ -40,33 +35,40 @@ class RecoveryEngine {
     required DateTime currentWeekMonday,
     required Map<int, List<TaskItem>> activeTasks,
   }) async {
-    int successCount = 0;
-    int partialSyncCount = 0;
-    int skippedConflictCount = 0;
-    int skippedDeadlineCount = 0;
-    int dbUpdateFailedCount = 0;
-    int syncFailedCount = 0;
-
     final user = supabase.auth.currentUser;
     if (user == null) {
       return const TaskRecoveryResult(databaseReadFailedCount: 1);
     }
 
-    final tomDate = currentDayDate.add(const Duration(days: 1));
-    final tomDayIdx = (tomDate.weekday - 1) % 7;
-    final targetTasks = activeTasks[tomDayIdx] ?? [];
-    final tomWeekStart = tomDate.subtract(Duration(days: tomDate.weekday - 1));
+    int success = 0;
+    int partialSync = 0;
+    int skippedConflict = 0;
+    int skippedDeadline = 0;
+    int dbUpdateFail = 0;
+    int dbReadFail = 0;
+    int syncFail = 0;
 
+    final tomorrowDate = currentDayDate.add(const Duration(days: 1));
+    final tomorrowWeekStart =
+        tomorrowDate.subtract(Duration(days: tomorrowDate.weekday - 1));
+    final tomorrowDayIdx = tomorrowDate.weekday - 1;
+
+    List<TaskItem> targetTasks = List.from(activeTasks[tomorrowDayIdx] ?? []);
     int currentHour = 10;
 
     for (var task in missedTasks) {
-      DateTime targetStart =
-          DateTime(tomDate.year, tomDate.month, tomDate.day, currentHour, 0);
-      DateTime targetEnd =
-          targetStart.add(Duration(minutes: task.durationMinutes));
+      DateTime candidateStart = DateTime(
+        tomorrowDate.year,
+        tomorrowDate.month,
+        tomorrowDate.day,
+        currentHour,
+        0,
+      );
+      DateTime candidateEnd =
+          candidateStart.add(Duration(minutes: task.durationMinutes));
 
-      if (task.deadline != null && targetEnd.isAfter(task.deadline!)) {
-        skippedDeadlineCount++;
+      if (task.deadline != null && candidateEnd.isAfter(task.deadline!)) {
+        skippedDeadline++;
         continue;
       }
 
@@ -75,10 +77,10 @@ class RecoveryEngine {
         userId: task.userId,
         title: task.title,
         category: task.category,
+        dayIndex: tomorrowDayIdx,
+        scheduledDate: _formatDate(tomorrowDate),
+        weekStartDate: _formatDate(tomorrowWeekStart),
         taskMode: task.taskMode,
-        dayIndex: tomDayIdx,
-        scheduledDate: formatDateToKey(tomDate),
-        weekStartDate: formatDateToKey(tomWeekStart),
         taskTime: "${currentHour.toString().padLeft(2, '0')}:00",
         durationMinutes: task.durationMinutes,
         priority: task.priority,
@@ -88,71 +90,98 @@ class RecoveryEngine {
         version: task.version,
       );
 
-      if (PlanningEngine.wouldConflictOnTargetDay(
-          candidateTask, tomDate, targetTasks)) {
-        skippedConflictCount++;
+      final hasConflict = PlanningEngine.wouldConflictOnTargetDay(
+        candidateTask,
+        tomorrowDate,
+        targetTasks,
+      );
+
+      if (hasConflict) {
+        skippedConflict++;
+        currentHour = (currentHour + (task.durationMinutes ~/ 60) + 1);
+        if (currentHour > 20) currentHour = 10;
         continue;
       }
 
-      final formattedTime = "${currentHour.toString().padLeft(2, '0')}:00";
-
-      // Claude P1 Çözümü: Ham update yerine save_task_mutation RPC'si
+      // Veritabanındaki güncel versiyonu alarak çakışmayı önle
+      int expectedVer = task.version;
       try {
-        final res = await supabase.rpc(
+        final currentDbRow = await supabase
+            .from('weekly_tasks')
+            .select('version')
+            .eq('id', task.id)
+            .eq('user_id', user.id)
+            .maybeSingle();
+        if (currentDbRow != null && currentDbRow['version'] != null) {
+          expectedVer = currentDbRow['version'] as int;
+        }
+      } catch (e) {
+        debugPrint("Recovery DB Read Hatası: $e");
+        dbReadFail++;
+        continue;
+      }
+
+      try {
+        final dynamic res = await supabase.rpc(
           'save_task_mutation',
           params: {
             'p_task_id': task.id,
             'p_title': task.title,
             'p_category': task.category,
-            'p_day_index': tomDayIdx,
-            'p_scheduled_date': formatDateToKey(tomDate),
-            'p_week_start_date': formatDateToKey(tomWeekStart),
-            'p_task_time': formattedTime,
+            'p_day_index': tomorrowDayIdx,
+            'p_scheduled_date': _formatDate(tomorrowDate),
+            'p_week_start_date': _formatDate(tomorrowWeekStart),
+            'p_task_time': "${currentHour.toString().padLeft(2, '0')}:00",
             'p_duration_minutes': task.durationMinutes,
             'p_priority': task.priority,
             'p_deadline': task.deadline?.toIso8601String(),
             'p_reminder_time': task.reminderTime,
             'p_is_completed': false,
-            'p_expected_version': task.version,
+            'p_expected_version': expectedVer,
+            'p_request_id':
+                'recovery_${task.id}_${DateTime.now().millisecondsSinceEpoch}',
           },
         );
 
         if (res is Map && res['success'] == true) {
-          task.dayIndex = tomDayIdx;
-          task.scheduledDate = formatDateToKey(tomDate);
-          task.weekStartDate = formatDateToKey(tomWeekStart);
-          task.taskTime = formattedTime;
-          task.version = res['version'] ?? (task.version + 1);
+          task.dayIndex = tomorrowDayIdx;
+          task.scheduledDate = _formatDate(tomorrowDate);
+          task.weekStartDate = _formatDate(tomorrowWeekStart);
+          task.taskTime = "${currentHour.toString().padLeft(2, '0')}:00";
+          task.version = res['version'] ?? (expectedVer + 1);
+
+          targetTasks.add(candidateTask);
 
           final syncRes = await TaskSyncCoordinator.coordinateTaskSync(
             task: task,
-            targetDate: tomDate,
+            targetDate: tomorrowDate,
           );
 
           if (syncRes.isFullySynced) {
-            successCount++;
+            success++;
           } else {
-            partialSyncCount++;
+            partialSync++;
           }
+
+          currentHour = (currentHour + (task.durationMinutes ~/ 60) + 1);
+          if (currentHour > 20) currentHour = 10;
         } else {
-          dbUpdateFailedCount++;
+          dbUpdateFail++;
         }
       } catch (e) {
         debugPrint("Recovery RPC Hatası: $e");
-        dbUpdateFailedCount++;
+        dbUpdateFail++;
       }
-
-      currentHour = (currentHour + (task.durationMinutes / 60).ceil() + 1);
-      if (currentHour > 20) currentHour = 10;
     }
 
     return TaskRecoveryResult(
-      successCount: successCount,
-      partialSyncCount: partialSyncCount,
-      skippedConflictCount: skippedConflictCount,
-      skippedDeadlineCount: skippedDeadlineCount,
-      databaseUpdateFailedCount: dbUpdateFailedCount,
-      syncFailedCount: syncFailedCount,
+      successCount: success,
+      partialSyncCount: partialSync,
+      skippedConflictCount: skippedConflict,
+      skippedDeadlineCount: skippedDeadline,
+      databaseUpdateFailedCount: dbUpdateFail,
+      databaseReadFailedCount: dbReadFail,
+      syncFailedCount: syncFail,
     );
   }
 }

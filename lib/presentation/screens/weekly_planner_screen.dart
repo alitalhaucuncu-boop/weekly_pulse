@@ -66,9 +66,6 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
   late DateTime currentWeekMonday;
   late ConfettiController _confettiController;
 
-  final SpeechToText _speechToText = SpeechToText();
-  bool _isListening = false;
-
   int voiceUsage = 0;
   int aiUsage = 0;
   bool isUserPremium = false;
@@ -1542,8 +1539,18 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
       cleanTitle = cleanTitle.replaceAll(
           RegExp('\\b$word\\b', caseSensitive: false), '');
     }
+
+    // Saat formatları (20:00, 20.00), ekler ('de, 'da, 'te, 'ta) ve noktalama temizliği
     cleanTitle = cleanTitle
-        .replaceAll(RegExp(r'\d{1,2}(:\d{2})?'), '')
+        .replaceAll(RegExp(r"\d{1,2}([:.]\d{2})?('da|'de|'ta|'te|da|de)?"), '')
+        .replaceAll(RegExp(r"[.\-,'’]+"), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+
+    // Saat kalıntılarını temizle (örn: "6'da", "6'de", "18:00")
+    cleanTitle = cleanTitle
+        .replaceAll(RegExp(r"\d{1,2}('da|'de|'ta|'te|da|de|:\d{2})?"), '')
+        .replaceAll(RegExp(r"^[\s'’]+"), '')
         .replaceAll(RegExp(r'\s+'), ' ')
         .trim();
 
@@ -1560,318 +1567,29 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
     );
   }
 
-  void _showVoiceInputDialog() async {
-    final speechController = TextEditingController();
-    VoiceTaskParseResult parsedResult = VoiceTaskParseResult(
-      title: '',
-      dayIndex: (selectedDayIndex < 0 || selectedDayIndex >= 7)
-          ? 0
-          : selectedDayIndex,
-      scheduledDate: _formatDateToKey(DateTime.now()),
-      taskTime: '10:00',
-      durationMinutes: 60,
-      priority: 'Orta',
-    );
-
-    bool available = false;
-    try {
-      available = await _speechToText.initialize(
-        onError: (val) => debugPrint('Mikrofon Hatası: $val'),
-        onStatus: (val) => debugPrint('Mikrofon Durumu: $val'),
-      );
-    } catch (e) {
-      debugPrint('Speech Init Hatası: $e');
-    }
-
-    if (!mounted) {
-      return;
-    }
-
-    bool isVoiceSaving = false;
-
-    showDialog(
+  void _showVoiceInputDialog() {
+    showModalBottomSheet(
       context: context,
-      barrierDismissible: true,
-      builder: (dialogContext) {
-        return StatefulBuilder(
-          builder: (context, setStateDialog) {
-            void startListening() async {
-              if (available) {
-                if (dialogContext.mounted) {
-                  setStateDialog(() => _isListening = true);
-                }
-                await _speechToText.listen(
-                  onResult: (result) {
-                    if (dialogContext.mounted) {
-                      setStateDialog(() {
-                        speechController.text = result.recognizedWords;
-                        parsedResult =
-                            _parseVoiceCommandToTask(result.recognizedWords);
-                      });
-                    }
-                  },
-                );
-              } else {
-                if (dialogContext.mounted) {
-                  ScaffoldMessenger.of(dialogContext).showSnackBar(
-                    const SnackBar(
-                        content: Text(
-                            'Mikrofon erişimi sağlanamadı veya cihazınızda desteklenmiyor.')),
-                  );
-                }
-              }
-            }
-
-            void stopListening() {
-              try {
-                if (_isListening) {
-                  _speechToText.stop();
-                }
-              } catch (_) {}
-              if (dialogContext.mounted) {
-                setStateDialog(() => _isListening = false);
-              }
-            }
-
-            final hasValidationError = parsedResult.validationError != null;
-
-            return AlertDialog(
-              shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(24)),
-              title: const Text('Akıllı Sesli Asistan 🎙️',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(fontWeight: FontWeight.bold)),
-              content: SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    GestureDetector(
-                      onTap: _isListening ? stopListening : startListening,
-                      child: AnimatedContainer(
-                        duration: const Duration(milliseconds: 300),
-                        padding: const EdgeInsets.all(20),
-                        decoration: BoxDecoration(
-                          color: _isListening
-                              ? Colors.redAccent
-                              : const Color(0xFF7895CB),
-                          shape: BoxShape.circle,
-                        ),
-                        child: Icon(
-                          _isListening ? Icons.mic : Icons.mic_none,
-                          color: Colors.white,
-                          size: 36,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    TextField(
-                      controller: speechController,
-                      maxLines: 2,
-                      decoration: const InputDecoration(
-                        labelText: 'Algılanan Metin',
-                        border: OutlineInputBorder(),
-                      ),
-                      onChanged: (val) {
-                        setStateDialog(() {
-                          parsedResult = _parseVoiceCommandToTask(val);
-                        });
-                      },
-                    ),
-                    const SizedBox(height: 12),
-                    Container(
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        color: widget.isDark
-                            ? Colors.grey.shade800
-                            : Colors.grey.shade200,
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                              '📌 Başlık: ${parsedResult.title.isEmpty ? '---' : parsedResult.title}',
-                              style: const TextStyle(
-                                  fontWeight: FontWeight.bold, fontSize: 13)),
-                          const SizedBox(height: 4),
-                          Text(
-                              '📅 Tarih: ${parsedResult.scheduledDate} (${fullWeekDays[parsedResult.dayIndex]})',
-                              style: const TextStyle(
-                                  color: Colors.blue,
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w600)),
-                          const SizedBox(height: 4),
-                          Text(
-                              '⏰ Saat & Süre: ${parsedResult.taskTime} (${parsedResult.durationMinutes} dk)',
-                              style: const TextStyle(
-                                  color: Colors.deepPurple,
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.bold)),
-                          if (parsedResult.deadline != null) ...[
-                            const SizedBox(height: 4),
-                            Text(
-                                '🎯 Son Teslim: ${parsedResult.deadline!.day}/${parsedResult.deadline!.month} ${parsedResult.deadline!.hour.toString().padLeft(2, '0')}:${parsedResult.deadline!.minute.toString().padLeft(2, '0')}',
-                                style: const TextStyle(
-                                    color: Colors.redAccent,
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.bold)),
-                          ],
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () {
-                    stopListening();
-                    if (dialogContext.mounted) {
-                      Navigator.pop(dialogContext);
-                    }
-                  },
-                  child: const Text('İptal'),
-                ),
-                ElevatedButton(
-                  style: ElevatedButton.styleFrom(
-                      backgroundColor: (hasValidationError || isVoiceSaving)
-                          ? Colors.grey
-                          : const Color(0xFF7895CB)),
-                  onPressed: (hasValidationError || isVoiceSaving)
-                      ? null
-                      : () async {
-                          if (speechController.text.trim().isEmpty) {
-                            return;
-                          }
-
-                          setStateDialog(() => isVoiceSaving = true);
-                          stopListening();
-                          final userId = supabase.auth.currentUser?.id;
-                          if (userId == null) {
-                            if (dialogContext.mounted) {
-                              setStateDialog(() => isVoiceSaving = false);
-                              Navigator.pop(dialogContext);
-                            }
-                            return;
-                          }
-
-                          final scaffoldMessenger =
-                              ScaffoldMessenger.of(context);
-                          final dialogNav = Navigator.of(dialogContext);
-                          final randomSuffix = Random()
-                              .nextInt(999999)
-                              .toString()
-                              .padLeft(6, '0');
-                          final String requestId =
-                              "voice_${userId}_${DateTime.now().millisecondsSinceEpoch}_$randomSuffix";
-
-                          try {
-                            final targetDate =
-                                DateTime.parse(parsedResult.scheduledDate);
-                            final derivedWeekStart = targetDate.subtract(
-                                Duration(days: targetDate.weekday - 1));
-                            final derivedDayIndex = targetDate.weekday - 1;
-
-                            final dynamic response = await supabase.rpc(
-                              'create_voice_task_with_quota',
-                              params: {
-                                'p_request_id': requestId,
-                                'p_title': parsedResult.title,
-                                'p_category': 'Sesli Plan',
-                                'p_day_index': derivedDayIndex,
-                                'p_scheduled_date': parsedResult.scheduledDate,
-                                'p_week_start_date':
-                                    _formatDateToKey(derivedWeekStart),
-                                'p_task_mode': activeMode,
-                                'p_task_time': parsedResult.taskTime,
-                                'p_duration_minutes':
-                                    parsedResult.durationMinutes,
-                                'p_priority': parsedResult.priority,
-                                'p_deadline':
-                                    parsedResult.deadline?.toIso8601String(),
-                                'p_reminder_time': parsedResult.reminderTime,
-                              },
-                            );
-
-                            if (response is! Map ||
-                                response['success'] != true) {
-                              if (dialogContext.mounted) {
-                                Navigator.pop(dialogContext);
-                              }
-                              if (!mounted) return;
-                              final message = (response is Map)
-                                  ? response['message']
-                                  : null;
-                              _showLimitExceededDialog(
-                                title: 'Haftalık Sesli Komut Hakkın Doldu! 🎙️',
-                                message: message ??
-                                    'Ücretsiz sürümde haftada en fazla 3 kez sesli komut kullanabilirsin.',
-                              );
-                              return;
-                            }
-
-                            final createdTask =
-                                TaskItem.fromJson(response['task']);
-
-                            if (dialogContext.mounted) {
-                              dialogNav.pop();
-                            }
-
-                            final syncResult =
-                                await TaskSyncCoordinator.coordinateTaskSync(
-                              task: createdTask,
-                              targetDate: targetDate,
-                            );
-
-                            if (!mounted) return;
-
-                            _fetchTasks();
-                            _fetchAllTasksForMonth(focusedCalendarDay);
-
-                            if (!syncResult.isFullySynced && mounted) {
-                              final msg = syncResult.effectiveUserMessage ??
-                                  'Senkronizasyon tamamlanamadı.';
-                              scaffoldMessenger.showSnackBar(
-                                SnackBar(
-                                    content: Text('⚠️ Plan eklendi: $msg')),
-                              );
-                            }
-                          } catch (e) {
-                            debugPrint("Sesli Görev Ekleme Hatası: $e");
-                            if (dialogContext.mounted) {
-                              setStateDialog(() => isVoiceSaving = false);
-                              dialogNav.pop();
-                            }
-                            if (mounted) {
-                              scaffoldMessenger.showSnackBar(
-                                SnackBar(
-                                    content: Text('Görev kaydedilemedi: $e')),
-                              );
-                            }
-                          }
-                        },
-                  child: isVoiceSaving
-                      ? const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(
-                              color: Colors.white, strokeWidth: 2))
-                      : const Text('Ekle 🚀',
-                          style: TextStyle(color: Colors.white)),
-                ),
-              ],
-            );
-          },
-        );
-      },
-    ).whenComplete(() {
-      try {
-        if (_isListening) {
-          _speechToText.stop();
-        }
-      } catch (_) {}
-      speechController.dispose();
-    });
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => VoiceInputBottomSheet(
+        isDark: widget.isDark,
+        selectedDayIndex: selectedDayIndex,
+        currentWeekMonday: currentWeekMonday,
+        activeMode: activeMode,
+        parseVoiceCommand: _parseVoiceCommandToTask,
+        onTaskCreated: () {
+          _fetchTasks();
+          _fetchAllTasksForMonth(focusedCalendarDay);
+        },
+        onQuotaExceeded: (msg) {
+          _showLimitExceededDialog(
+            title: 'Haftalık Sesli Komut Hakkın Doldu! 🎙️',
+            message: msg,
+          );
+        },
+      ),
+    );
   }
 
   void _showEditTaskDialog(TaskItem task) {
@@ -3922,6 +3640,361 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
           ],
         );
       },
+    );
+  }
+}
+
+class VoiceInputBottomSheet extends StatefulWidget {
+  final bool isDark;
+  final int selectedDayIndex;
+  final DateTime currentWeekMonday;
+  final String activeMode;
+  final VoiceTaskParseResult Function(String) parseVoiceCommand;
+  final VoidCallback onTaskCreated;
+  final Function(String) onQuotaExceeded;
+
+  const VoiceInputBottomSheet({
+    super.key,
+    required this.isDark,
+    required this.selectedDayIndex,
+    required this.currentWeekMonday,
+    required this.activeMode,
+    required this.parseVoiceCommand,
+    required this.onTaskCreated,
+    required this.onQuotaExceeded,
+  });
+
+  @override
+  State<VoiceInputBottomSheet> createState() => _VoiceInputBottomSheetState();
+}
+
+class _VoiceInputBottomSheetState extends State<VoiceInputBottomSheet> {
+  final SpeechToText _speech = SpeechToText();
+  final TextEditingController _speechController = TextEditingController();
+  bool _isListening = false;
+  bool _isSaving = false;
+  bool _speechAvailable = false;
+  String? _modalError;
+  late VoiceTaskParseResult _parsedResult;
+
+  @override
+  void initState() {
+    super.initState();
+    _parsedResult = VoiceTaskParseResult(
+      title: '',
+      dayIndex: (widget.selectedDayIndex < 0 || widget.selectedDayIndex >= 7)
+          ? 0
+          : widget.selectedDayIndex,
+      scheduledDate:
+          "${widget.currentWeekMonday.year}-${widget.currentWeekMonday.month.toString().padLeft(2, '0')}-${widget.currentWeekMonday.day.toString().padLeft(2, '0')}",
+      taskTime: '10:00',
+      durationMinutes: 60,
+      priority: 'Orta',
+    );
+    _initSpeech();
+  }
+
+  void _initSpeech() async {
+    try {
+      final available = await _speech.initialize(
+        onError: (e) => debugPrint('STT Hata: $e'),
+        onStatus: (s) => debugPrint('STT Durum: $s'),
+      );
+      if (mounted) {
+        setState(() => _speechAvailable = available);
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _toggleListening() async {
+    if (_isListening) {
+      await _speech.stop();
+      if (mounted) setState(() => _isListening = false);
+    } else {
+      if (_speechAvailable) {
+        setState(() {
+          _isListening = true;
+          _modalError = null;
+        });
+        await _speech.listen(
+          onResult: (result) {
+            if (mounted) {
+              setState(() {
+                _speechController.text = result.recognizedWords;
+                _parsedResult =
+                    widget.parseVoiceCommand(result.recognizedWords);
+              });
+            }
+          },
+        );
+      } else {
+        if (mounted) {
+          setState(() {
+            _modalError =
+                'Mikrofon erişimi sağlanamadı. Metni elle yazabilirsiniz.';
+          });
+        }
+      }
+    }
+  }
+
+  Future<void> _safeClose() async {
+    try {
+      if (_speech.isListening) {
+        await _speech.stop();
+      }
+    } catch (_) {}
+    if (mounted) {
+      Navigator.of(context).pop();
+    }
+  }
+
+  @override
+  void dispose() {
+    try {
+      _speech.stop();
+    } catch (_) {}
+    _speechController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final hasValidationError = _parsedResult.validationError != null;
+
+    return Container(
+      decoration: BoxDecoration(
+        color: Theme.of(context).cardColor,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      padding: EdgeInsets.only(
+        top: 24,
+        left: 20,
+        right: 20,
+        bottom: MediaQuery.of(context).viewInsets.bottom + 20,
+      ),
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('Akıllı Sesli Asistan 🎙️',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            if (_modalError != null) ...[
+              const SizedBox(height: 8),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: Colors.red.shade100,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  _modalError!,
+                  style: const TextStyle(
+                      color: Colors.red,
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold),
+                ),
+              ),
+            ],
+            const SizedBox(height: 16),
+            GestureDetector(
+              onTap: _toggleListening,
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 300),
+                padding: const EdgeInsets.all(20),
+                decoration: BoxDecoration(
+                  color:
+                      _isListening ? Colors.redAccent : const Color(0xFF7895CB),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(
+                  _isListening ? Icons.mic : Icons.mic_none,
+                  color: Colors.white,
+                  size: 36,
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: _speechController,
+              maxLines: 2,
+              decoration: const InputDecoration(
+                labelText: 'Algılanan veya Yazılan Metin',
+                border: OutlineInputBorder(),
+              ),
+              onChanged: (val) {
+                setState(() {
+                  _parsedResult = widget.parseVoiceCommand(val);
+                });
+              },
+            ),
+            const SizedBox(height: 12),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color:
+                    widget.isDark ? Colors.grey.shade800 : Colors.grey.shade200,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                      '📌 Başlık: ${_parsedResult.title.isEmpty ? (_speechController.text.trim().isEmpty ? '---' : _speechController.text.trim()) : _parsedResult.title}',
+                      style: const TextStyle(
+                          fontWeight: FontWeight.bold, fontSize: 13)),
+                  const SizedBox(height: 4),
+                  Text(
+                      '📅 Tarih: ${_parsedResult.scheduledDate} (${fullWeekDays[_parsedResult.dayIndex]})',
+                      style: const TextStyle(
+                          color: Colors.blue,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 4),
+                  Text(
+                      '⏰ Saat & Süre: ${_parsedResult.taskTime} (${_parsedResult.durationMinutes} dk)',
+                      style: const TextStyle(
+                          color: Colors.deepPurple,
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold)),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Expanded(
+                  child: TextButton(
+                    onPressed: _isSaving ? null : _safeClose,
+                    child: const Text('İptal'),
+                  ),
+                ),
+                Expanded(
+                  child: ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: (hasValidationError || _isSaving)
+                          ? Colors.grey
+                          : const Color(0xFF7895CB),
+                    ),
+                    onPressed: (hasValidationError || _isSaving)
+                        ? null
+                        : () async {
+                            final rawInput = _speechController.text.trim();
+                            if (rawInput.isEmpty) {
+                              setState(() => _modalError =
+                                  'Lütfen bir komut söyleyin veya yazın.');
+                              return;
+                            }
+
+                            setState(() {
+                              _isSaving = true;
+                              _modalError = null;
+                            });
+
+                            try {
+                              if (_speech.isListening) await _speech.stop();
+                            } catch (_) {}
+
+                            final user = supabase.auth.currentUser;
+                            if (user == null) {
+                              _safeClose();
+                              return;
+                            }
+
+                            final String requestId =
+                                "voice_${user.id}_${DateTime.now().millisecondsSinceEpoch}_${Random().nextInt(999999)}";
+
+                            try {
+                              final targetDate =
+                                  DateTime.parse(_parsedResult.scheduledDate);
+                              final derivedWeekStart = targetDate.subtract(
+                                  Duration(days: targetDate.weekday - 1));
+                              final derivedDayIndex = targetDate.weekday - 1;
+                              final finalTitle =
+                                  _parsedResult.title.trim().isEmpty
+                                      ? rawInput
+                                      : _parsedResult.title.trim();
+
+                              final dynamic res = await supabase.rpc(
+                                'create_voice_task_with_quota',
+                                params: {
+                                  'p_request_id': requestId,
+                                  'p_title': finalTitle,
+                                  'p_category': 'Sesli Plan',
+                                  'p_day_index': derivedDayIndex,
+                                  'p_scheduled_date':
+                                      _parsedResult.scheduledDate,
+                                  'p_week_start_date':
+                                      "${derivedWeekStart.year}-${derivedWeekStart.month.toString().padLeft(2, '0')}-${derivedWeekStart.day.toString().padLeft(2, '0')}",
+                                  'p_task_mode': widget.activeMode,
+                                  'p_task_time': _parsedResult.taskTime,
+                                  'p_duration_minutes':
+                                      _parsedResult.durationMinutes,
+                                  'p_priority': _parsedResult.priority,
+                                  'p_deadline':
+                                      _parsedResult.deadline?.toIso8601String(),
+                                  'p_reminder_time': _parsedResult.reminderTime,
+                                },
+                              );
+
+                              if (res is! Map || res['success'] != true) {
+                                final errCode =
+                                    (res is Map) ? res['code'] : null;
+                                final errMsg =
+                                    (res is Map) ? res['message'] : null;
+
+                                if (errCode == 'QUOTA_EXCEEDED') {
+                                  if (mounted) Navigator.of(context).pop();
+                                  widget.onQuotaExceeded(errMsg ??
+                                      'Haftalık 3 sesli komut kotanız doldu.');
+                                  return;
+                                }
+
+                                if (mounted) {
+                                  setState(() {
+                                    _isSaving = false;
+                                    _modalError = errMsg ?? 'Kayıt başarısız.';
+                                  });
+                                }
+                                return;
+                              }
+
+                              final createdTask =
+                                  TaskItem.fromJson(res['task']);
+                              if (mounted) Navigator.of(context).pop();
+                              widget.onTaskCreated();
+
+                              await TaskSyncCoordinator.coordinateTaskSync(
+                                task: createdTask,
+                                targetDate: targetDate,
+                              );
+                            } catch (e) {
+                              debugPrint("Voice Save Hatası: $e");
+                              if (mounted) {
+                                setState(() {
+                                  _isSaving = false;
+                                  _modalError = 'Bağlantı hatası: $e';
+                                });
+                              }
+                            }
+                          },
+                    child: _isSaving
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(
+                                color: Colors.white, strokeWidth: 2))
+                        : const Text('Ekle 🚀',
+                            style: TextStyle(color: Colors.white)),
+                  ),
+                ),
+              ],
+            )
+          ],
+        ),
+      ),
     );
   }
 }
