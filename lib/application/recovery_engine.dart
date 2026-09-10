@@ -103,7 +103,6 @@ class RecoveryEngine {
         continue;
       }
 
-      // Veritabanındaki güncel versiyonu alarak çakışmayı önle
       int expectedVer = task.version;
       try {
         final currentDbRow = await supabase

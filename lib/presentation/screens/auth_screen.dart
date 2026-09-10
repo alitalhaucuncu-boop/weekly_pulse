@@ -131,7 +131,8 @@ class _AuthScreenState extends State<AuthScreen> {
 
   void _handleAuth() async {
     final email = _emailController.text.trim();
-    final password = _passwordController.text.trim();
+    // AUD-029: Şifre alanında trim yapılmaz, geçerli sınır boşlukları korunur
+    final password = _passwordController.text;
 
     if (email.isEmpty || password.isEmpty) {
       setState(() {
