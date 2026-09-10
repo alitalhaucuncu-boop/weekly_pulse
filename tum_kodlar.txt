@@ -640,7 +640,6 @@ class RecoveryEngine {
         continue;
       }
 
-      // Veritabanındaki güncel versiyonu alarak çakışmayı önle
       int expectedVer = task.version;
       try {
         final currentDbRow = await supabase
@@ -1439,7 +1438,8 @@ class _AuthScreenState extends State<AuthScreen> {
 
   void _handleAuth() async {
     final email = _emailController.text.trim();
-    final password = _passwordController.text.trim();
+    // AUD-029: Şifre alanında trim yapılmaz, geçerli sınır boşlukları korunur
+    final password = _passwordController.text;
 
     if (email.isEmpty || password.isEmpty) {
       setState(() {
@@ -1766,6 +1766,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
   final Set<String> _movingTaskIds = <String>{};
 
   int _fetchGeneration = 0;
+  int _monthFetchGeneration = 0; // AUD-021: Ay fetch yarış koruması
 
   late DateTime currentWeekMonday;
   late ConfettiController _confettiController;
@@ -2404,7 +2405,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                           final nav = Navigator.of(context);
                           final dialogNav = Navigator.of(dialogContext);
 
-                          final pwd = passwordController.text.trim();
+                          final pwd = passwordController.text;
                           if (pwd.isEmpty) {
                             setStateDialog(
                                 () => dialogError = 'Lütfen şifrenizi girin.');
@@ -3244,14 +3245,6 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
           RegExp('\\b$word\\b', caseSensitive: false), '');
     }
 
-    // Saat formatları (20:00, 20.00), ekler ('de, 'da, 'te, 'ta) ve noktalama temizliği
-    cleanTitle = cleanTitle
-        .replaceAll(RegExp(r"\d{1,2}([:.]\d{2})?('da|'de|'ta|'te|da|de)?"), '')
-        .replaceAll(RegExp(r"[.\-,'’]+"), ' ')
-        .replaceAll(RegExp(r'\s+'), ' ')
-        .trim();
-
-    // Saat kalıntılarını temizle (örn: "6'da", "6'de", "18:00")
     cleanTitle = cleanTitle
         .replaceAll(RegExp(r"\d{1,2}('da|'de|'ta|'te|da|de|:\d{2})?"), '')
         .replaceAll(RegExp(r"^[\s'’]+"), '')
@@ -3838,7 +3831,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                         const Text('Son Teslim (Deadline):',
                             style: TextStyle(fontWeight: FontWeight.bold)),
                         Row(
-                          mainAxisSize: MainAxisSize.min,
+                          mainAxisSize: MainBuildContext.min,
                           children: [
                             OutlinedButton.icon(
                               icon: const Icon(Icons.event_available, size: 18),
@@ -4123,6 +4116,8 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
   }
 
   Future<void> _fetchAllTasksForMonth(DateTime monthDate) async {
+    // AUD-021: Nesil kontrolü ile ay yarış durumunu engelle
+    final int gen = ++_monthFetchGeneration;
     try {
       final user = supabase.auth.currentUser;
       if (user == null) {
@@ -4140,6 +4135,8 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
           .lte('scheduled_date', _formatDateToKey(lastDay))
           .order('scheduled_date', ascending: true)
           .order('task_time', ascending: true);
+
+      if (gen != _monthFetchGeneration) return;
 
       List<TaskItem> loaded = [];
       for (var row in response) {
@@ -4239,11 +4236,8 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
     } catch (e) {
       debugPrint("Taşıma Hatası: $e");
       if (mounted) {
-        setState(() {
-          task.dayIndex = oldDayIndex;
-          task.scheduledDate = oldScheduledDate;
-          task.weekStartDate = oldWeekStartDate;
-        });
+        // AUD-011: Hata durumunda yalnızca tarihi değil tüm durumu sunucuyla eşitle
+        await _fetchTasks();
       }
       return const TaskMoveResult(
         status: TaskMoveStatus.failed,
@@ -5749,6 +5743,14 @@ class WeeklyPulseApp extends StatefulWidget {
 
 class _WeeklyPulseAppState extends State<WeeklyPulseApp> {
   bool _isDark = false;
+  late final Stream<AuthState> _authStream;
+
+  @override
+  void initState() {
+    super.initState();
+    // AUD-012: Merkezi oturum ve auth değişiklik dinleyicisi
+    _authStream = supabase.auth.onAuthStateChange;
+  }
 
   void _toggleTheme() {
     setState(() {
@@ -5758,43 +5760,48 @@ class _WeeklyPulseAppState extends State<WeeklyPulseApp> {
 
   @override
   Widget build(BuildContext context) {
-    final session = supabase.auth.currentSession;
+    return StreamBuilder<AuthState>(
+      stream: _authStream,
+      builder: (context, snapshot) {
+        final session = supabase.auth.currentSession;
 
-    return MaterialApp(
-      title: 'WeeklyPulse',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        brightness: Brightness.light,
-        primaryColor: const Color(0xFF4A55A2),
-        scaffoldBackgroundColor: const Color(0xFFF5F7FB),
-        cardColor: Colors.white,
-        colorScheme: const ColorScheme.light(
-          primary: Color(0xFF4A55A2),
-          secondary: Color(0xFF7895CB),
-        ),
-        useMaterial3: true,
-      ),
-      darkTheme: ThemeData(
-        brightness: Brightness.dark,
-        primaryColor: const Color(0xFF7895CB),
-        scaffoldBackgroundColor: const Color(0xFF0F172A),
-        cardColor: const Color(0xFF1E293B),
-        colorScheme: const ColorScheme.dark(
-          primary: Color(0xFF7895CB),
-          secondary: Color(0xFFA0BFE0),
-        ),
-        useMaterial3: true,
-      ),
-      themeMode: _isDark ? ThemeMode.dark : ThemeMode.light,
-      home: session != null
-          ? WeeklyPlannerScreen(
-              isDark: _isDark,
-              onThemeToggle: _toggleTheme,
-            )
-          : AuthScreen(
-              isDark: _isDark,
-              onThemeToggle: _toggleTheme,
+        return MaterialApp(
+          title: 'WeeklyPulse',
+          debugShowCheckedModeBanner: false,
+          theme: ThemeData(
+            brightness: Brightness.light,
+            primaryColor: const Color(0xFF4A55A2),
+            scaffoldBackgroundColor: const Color(0xFFF5F7FB),
+            cardColor: Colors.white,
+            colorScheme: const ColorScheme.light(
+              primary: Color(0xFF4A55A2),
+              secondary: Color(0xFF7895CB),
             ),
+            useMaterial3: true,
+          ),
+          darkTheme: ThemeData(
+            brightness: Brightness.dark,
+            primaryColor: const Color(0xFF7895CB),
+            scaffoldBackgroundColor: const Color(0xFF0F172A),
+            cardColor: const Color(0xFF1E293B),
+            colorScheme: const ColorScheme.dark(
+              primary: Color(0xFF7895CB),
+              secondary: Color(0xFFA0BFE0),
+            ),
+            useMaterial3: true,
+          ),
+          themeMode: _isDark ? ThemeMode.dark : ThemeMode.light,
+          home: session != null
+              ? WeeklyPlannerScreen(
+                  isDark: _isDark,
+                  onThemeToggle: _toggleTheme,
+                )
+              : AuthScreen(
+                  isDark: _isDark,
+                  onThemeToggle: _toggleTheme,
+                ),
+        );
+      },
     );
   }
 }

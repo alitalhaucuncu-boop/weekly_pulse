@@ -62,7 +62,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
   final Set<String> _movingTaskIds = <String>{};
 
   int _fetchGeneration = 0;
-  int _monthFetchGeneration = 0; // AUD-021: Ay fetch yarış koruması
+  int _monthFetchGeneration = 0;
 
   late DateTime currentWeekMonday;
   late ConfettiController _confettiController;
@@ -2127,7 +2127,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                         const Text('Son Teslim (Deadline):',
                             style: TextStyle(fontWeight: FontWeight.bold)),
                         Row(
-                          mainAxisSize: MainBuildContext.min,
+                          mainAxisSize: MainAxisSize.min,
                           children: [
                             OutlinedButton.icon(
                               icon: const Icon(Icons.event_available, size: 18),
@@ -2412,7 +2412,6 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
   }
 
   Future<void> _fetchAllTasksForMonth(DateTime monthDate) async {
-    // AUD-021: Nesil kontrolü ile ay yarış durumunu engelle
     final int gen = ++_monthFetchGeneration;
     try {
       final user = supabase.auth.currentUser;
@@ -2453,10 +2452,6 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
       return const TaskMoveResult(
           status: TaskMoveStatus.busy, message: 'İşlem sürüyor.');
     }
-
-    final oldDayIndex = task.dayIndex;
-    final oldScheduledDate = task.scheduledDate;
-    final oldWeekStartDate = task.weekStartDate;
 
     final newDate = currentWeekMonday.add(Duration(days: newDayIndex));
     final derivedWeekStart =
@@ -2532,7 +2527,6 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
     } catch (e) {
       debugPrint("Taşıma Hatası: $e");
       if (mounted) {
-        // AUD-011: Hata durumunda yalnızca tarihi değil tüm durumu sunucuyla eşitle
         await _fetchTasks();
       }
       return const TaskMoveResult(
@@ -3933,6 +3927,8 @@ class _VoiceInputBottomSheetState extends State<VoiceInputBottomSheet> {
                                 },
                               );
 
+                              if (!mounted) return;
+
                               if (res is! Map || res['success'] != true) {
                                 final errCode =
                                     (res is Map) ? res['code'] : null;
@@ -3940,24 +3936,22 @@ class _VoiceInputBottomSheetState extends State<VoiceInputBottomSheet> {
                                     (res is Map) ? res['message'] : null;
 
                                 if (errCode == 'QUOTA_EXCEEDED') {
-                                  if (mounted) Navigator.of(context).pop();
+                                  Navigator.of(context).pop();
                                   widget.onQuotaExceeded(errMsg ??
                                       'Haftalık 3 sesli komut kotanız doldu.');
                                   return;
                                 }
 
-                                if (mounted) {
-                                  setState(() {
-                                    _isSaving = false;
-                                    _modalError = errMsg ?? 'Kayıt başarısız.';
-                                  });
-                                }
+                                setState(() {
+                                  _isSaving = false;
+                                  _modalError = errMsg ?? 'Kayıt başarısız.';
+                                });
                                 return;
                               }
 
                               final createdTask =
                                   TaskItem.fromJson(res['task']);
-                              if (mounted) Navigator.of(context).pop();
+                              Navigator.of(context).pop();
                               widget.onTaskCreated();
 
                               await TaskSyncCoordinator.coordinateTaskSync(
