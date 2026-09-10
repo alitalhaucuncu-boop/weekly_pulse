@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../core/constants.dart';
-import '../widgets/legal_modal.dart';
 import 'weekly_planner_screen.dart';
 
 class AuthScreen extends StatefulWidget {
@@ -18,9 +18,9 @@ class AuthScreen extends StatefulWidget {
 }
 
 class _AuthScreenState extends State<AuthScreen> {
+  bool isLogin = true;
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
-  bool _isSignUp = false;
   bool _isLoading = false;
   String? _errorMessage;
 
@@ -31,86 +31,17 @@ class _AuthScreenState extends State<AuthScreen> {
     super.dispose();
   }
 
-  Future<void> _submit() async {
-    final email = _emailController.text.trim();
-    final password = _passwordController.text.trim();
-
-    if (email.isEmpty || password.isEmpty) {
-      setState(() => _errorMessage = 'Lütfen e-posta ve şifrenizi girin.');
-      return;
-    }
-
-    if (password.length < 6) {
-      setState(() => _errorMessage = 'Şifre en az 6 karakter olmalıdır.');
-      return;
-    }
-
-    setState(() {
-      _isLoading = true;
-      _errorMessage = null;
-    });
-
-    try {
-      if (_isSignUp) {
-        final res = await supabase.auth.signUp(
-          email: email,
-          password: password,
-        );
-        if (res.user == null) {
-          throw Exception('Kayıt oluşturulamadı.');
-        }
-      } else {
-        final res = await supabase.auth.signInWithPassword(
-          email: email,
-          password: password,
-        );
-        if (res.user == null) {
-          throw Exception('Giriş başarısız.');
-        }
-      }
-
-      if (mounted) {
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(
-            builder: (_) => WeeklyPlannerScreen(
-              isDark: widget.isDark,
-              onThemeToggle: widget.onThemeToggle,
-            ),
-          ),
-        );
-      }
-    } catch (e) {
-      String msg = 'Giriş yapılamadı. Bilgilerinizi kontrol edin.';
-      final errStr = e.toString().toLowerCase();
-      if (errStr.contains('user already registered')) {
-        msg = 'Bu e-posta ile zaten bir hesap var. Giriş yapmayı deneyin.';
-      } else if (errStr.contains('invalid login credentials')) {
-        msg = 'E-posta veya şifre hatalı.';
-      } else if (errStr.contains('network') || errStr.contains('socket')) {
-        msg = 'İnternet bağlantınızı kontrol edin.';
-      }
-      if (mounted) {
-        setState(() => _errorMessage = msg);
-      }
-    } finally {
-      if (mounted) {
-        setState(() => _isLoading = false);
-      }
-    }
-  }
-
   void _showForgotPasswordDialog() {
     final resetEmailController =
         TextEditingController(text: _emailController.text.trim());
-    bool isSending = false;
-    String? dialogError;
+    String? resetError;
+    bool isResetSending = false;
 
     showDialog(
       context: context,
-      builder: (dialogCtx) {
+      builder: (dialogContext) {
         return StatefulBuilder(
-          builder: (ctx, setDialogState) {
+          builder: (ctx, setStateDialog) {
             return AlertDialog(
               shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(20)),
@@ -118,80 +49,76 @@ class _AuthScreenState extends State<AuthScreen> {
                   style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
               content: Column(
                 mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   const Text(
-                    'Şifre sıfırlama bağlantısı almak için hesabınıza kayıtlı e-posta adresinizi yazın.',
+                    'Kayıtlı e-posta adresinizi girin. Size şifre sıfırlama bağlantısı göndereceğiz.',
                     style: TextStyle(fontSize: 13, color: Colors.grey),
                   ),
-                  const SizedBox(height: 12),
+                  const SizedBox(height: 16),
                   TextField(
                     controller: resetEmailController,
                     keyboardType: TextInputType.emailAddress,
-                    decoration: const InputDecoration(
-                      labelText: 'E-Posta Adresi',
-                      border: OutlineInputBorder(),
+                    decoration: InputDecoration(
+                      labelText: 'E-posta Adresi',
+                      errorText: resetError,
+                      border: const OutlineInputBorder(),
                     ),
                   ),
-                  if (dialogError != null) ...[
-                    const SizedBox(height: 8),
-                    Text(dialogError!,
-                        style: const TextStyle(
-                            color: Colors.redAccent, fontSize: 12)),
-                  ],
                 ],
               ),
               actions: [
                 TextButton(
-                  onPressed: () => Navigator.pop(dialogCtx),
-                  child: const Text('Vazgeç'),
+                  onPressed: isResetSending
+                      ? null
+                      : () => Navigator.pop(dialogContext),
+                  child: const Text('İptal'),
                 ),
                 ElevatedButton(
                   style: ElevatedButton.styleFrom(
                       backgroundColor: const Color(0xFF4A55A2)),
-                  onPressed: isSending
+                  onPressed: isResetSending
                       ? null
                       : () async {
                           final email = resetEmailController.text.trim();
                           if (email.isEmpty || !email.contains('@')) {
-                            setDialogState(() => dialogError =
-                                'Geçerli bir e-posta adresi girin.');
+                            setStateDialog(() => resetError =
+                                'Lütfen geçerli bir e-posta adresi girin.');
                             return;
                           }
 
-                          setDialogState(() {
-                            isSending = true;
-                            dialogError = null;
+                          setStateDialog(() {
+                            isResetSending = true;
+                            resetError = null;
                           });
 
                           try {
                             await supabase.auth.resetPasswordForEmail(email);
-                            if (!dialogCtx.mounted) return;
-                            Navigator.pop(dialogCtx);
+                            if (dialogContext.mounted) {
+                              Navigator.pop(dialogContext);
+                            }
                             if (mounted) {
                               ScaffoldMessenger.of(context).showSnackBar(
                                 const SnackBar(
                                   content: Text(
-                                      'Şifre sıfırlama e-postası gönderildi. Kutunuzu kontrol edin.'),
+                                      '📩 Şifre sıfırlama bağlantısı e-postanıza gönderildi!'),
                                   backgroundColor: Colors.green,
                                 ),
                               );
                             }
                           } catch (e) {
-                            setDialogState(() {
-                              isSending = false;
-                              dialogError = 'E-posta gönderilemedi: $e';
+                            setStateDialog(() {
+                              isResetSending = false;
+                              resetError = 'Hata oluştu: $e';
                             });
                           }
                         },
-                  child: isSending
+                  child: isResetSending
                       ? const SizedBox(
-                          width: 16,
-                          height: 16,
+                          width: 18,
+                          height: 18,
                           child: CircularProgressIndicator(
-                              color: Colors.white, strokeWidth: 2),
-                        )
-                      : const Text('Gönder',
+                              color: Colors.white, strokeWidth: 2))
+                      : const Text('Bağlantı Gönder',
                           style: TextStyle(color: Colors.white)),
                 ),
               ],
@@ -202,12 +129,104 @@ class _AuthScreenState extends State<AuthScreen> {
     );
   }
 
+  void _handleAuth() async {
+    final email = _emailController.text.trim();
+    final password = _passwordController.text.trim();
+
+    if (email.isEmpty || password.isEmpty) {
+      setState(() {
+        _errorMessage = 'Lütfen tüm alanları doldurun.';
+      });
+      return;
+    }
+
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
+
+    final scaffoldMessenger = ScaffoldMessenger.of(context);
+    final nav = Navigator.of(context);
+
+    try {
+      if (isLogin) {
+        final res = await supabase.auth.signInWithPassword(
+          email: email,
+          password: password,
+        );
+
+        if (res.session != null && mounted) {
+          nav.pushReplacement(
+            MaterialPageRoute(
+              builder: (_) => WeeklyPlannerScreen(
+                isDark: widget.isDark,
+                onThemeToggle: widget.onThemeToggle,
+              ),
+            ),
+          );
+        }
+      } else {
+        final res = await supabase.auth.signUp(
+          email: email,
+          password: password,
+        );
+
+        if (res.session == null && res.user != null) {
+          if (mounted) {
+            setState(() {
+              _isLoading = false;
+              isLogin = true;
+            });
+            scaffoldMessenger.showSnackBar(
+              const SnackBar(
+                content: Text(
+                    '📩 Kayıt başarılı! Lütfen e-postanıza gelen doğrulama bağlantısına tıklayıp giriş yapın.'),
+                duration: Duration(seconds: 5),
+                backgroundColor: Colors.blueAccent,
+              ),
+            );
+          }
+          return;
+        }
+
+        if (res.session != null && mounted) {
+          nav.pushReplacement(
+            MaterialPageRoute(
+              builder: (_) => WeeklyPlannerScreen(
+                isDark: widget.isDark,
+                onThemeToggle: widget.onThemeToggle,
+              ),
+            ),
+          );
+        }
+      }
+    } on AuthException catch (e) {
+      if (mounted) {
+        setState(() {
+          _errorMessage = e.message;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _errorMessage = 'Bağlantı hatası oluştu: $e';
+        });
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    const primaryColor = Color(0xFF4A55A2);
-
     return Scaffold(
       appBar: AppBar(
+        title: const Text('WeeklyPulse ⚡',
+            style: TextStyle(fontWeight: FontWeight.bold)),
         actions: [
           IconButton(
             icon: Icon(
@@ -218,136 +237,154 @@ class _AuthScreenState extends State<AuthScreen> {
       ),
       body: Center(
         child: SingleChildScrollView(
-          padding: const EdgeInsets.all(28.0),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Container(
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: primaryColor.withValues(alpha: 0.12),
-                  shape: BoxShape.circle,
-                ),
-                child: const Icon(Icons.calendar_month_rounded,
-                    size: 48, color: primaryColor),
-              ),
-              const SizedBox(height: 16),
-              const Text(
-                'WeeklyPulse',
-                style: TextStyle(fontSize: 26, fontWeight: FontWeight.bold),
-              ),
-              const SizedBox(height: 4),
-              const Text(
-                'Hayat planını bozar, WeeklyPulse toparlar.',
-                style: TextStyle(fontSize: 13, color: Colors.grey),
-              ),
-              const SizedBox(height: 28),
-              if (_errorMessage != null) ...[
-                Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: Colors.redAccent.withValues(alpha: 0.1),
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border.all(
-                        color: Colors.redAccent.withValues(alpha: 0.4)),
-                  ),
-                  child: Text(
-                    _errorMessage!,
-                    style: const TextStyle(
-                        color: Colors.redAccent,
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600),
-                  ),
-                ),
-                const SizedBox(height: 16),
-              ],
-              TextField(
-                controller: _emailController,
-                keyboardType: TextInputType.emailAddress,
-                decoration: InputDecoration(
-                  labelText: 'E-Posta',
-                  prefixIcon: const Icon(Icons.email_outlined),
-                  border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(14)),
-                ),
-              ),
-              const SizedBox(height: 14),
-              TextField(
-                controller: _passwordController,
-                obscureText: true,
-                decoration: InputDecoration(
-                  labelText: 'Şifre',
-                  prefixIcon: const Icon(Icons.lock_outline),
-                  border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(14)),
-                ),
-              ),
-              if (!_isSignUp) ...[
-                Align(
-                  alignment: Alignment.centerRight,
-                  child: TextButton(
-                    onPressed: _showForgotPasswordDialog,
-                    child: const Text('Şifremi Unuttum',
-                        style: TextStyle(fontSize: 12, color: primaryColor)),
-                  ),
-                ),
-              ] else
-                const SizedBox(height: 14),
-              SizedBox(
-                width: double.infinity,
-                height: 50,
-                child: ElevatedButton(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: primaryColor,
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(14)),
-                  ),
-                  onPressed: _isLoading ? null : _submit,
-                  child: _isLoading
-                      ? const SizedBox(
-                          width: 22,
-                          height: 22,
-                          child: CircularProgressIndicator(
-                              color: Colors.white, strokeWidth: 2),
-                        )
-                      : Text(
-                          _isSignUp ? 'Hesap Oluştur' : 'Giriş Yap',
-                          style: const TextStyle(
-                              color: Colors.white,
-                              fontWeight: FontWeight.bold,
-                              fontSize: 15),
+          padding: const EdgeInsets.all(24.0),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 400),
+            child: Card(
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(24)),
+              elevation: 4,
+              child: Padding(
+                padding: const EdgeInsets.all(28.0),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      isLogin ? 'Giriş Yap' : 'Kayıt Ol',
+                      style: const TextStyle(
+                          fontSize: 24, fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(height: 8),
+                    const Text(
+                      'Hayat planını bozar, WeeklyPulse toparlar.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(fontSize: 12, color: Colors.grey),
+                    ),
+                    const SizedBox(height: 20),
+                    if (_errorMessage != null) ...[
+                      Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: Colors.red.shade100,
+                          borderRadius: BorderRadius.circular(10),
                         ),
+                        child: Text(
+                          _errorMessage!,
+                          style: const TextStyle(
+                              color: Colors.red,
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                    ],
+                    TextField(
+                      controller: _emailController,
+                      keyboardType: TextInputType.emailAddress,
+                      decoration: const InputDecoration(
+                        labelText: 'E-posta',
+                        prefixIcon: Icon(Icons.email_outlined),
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    TextField(
+                      controller: _passwordController,
+                      obscureText: true,
+                      decoration: const InputDecoration(
+                        labelText: 'Şifre',
+                        prefixIcon: Icon(Icons.lock_outline),
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    if (isLogin) ...[
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: TextButton(
+                          onPressed: _showForgotPasswordDialog,
+                          child: const Text('Şifremi Unuttum?',
+                              style: TextStyle(fontSize: 12)),
+                        ),
+                      ),
+                    ],
+                    const SizedBox(height: 16),
+                    SizedBox(
+                      width: double.infinity,
+                      height: 48,
+                      child: ElevatedButton(
+                        style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF4A55A2)),
+                        onPressed: _isLoading ? null : _handleAuth,
+                        child: _isLoading
+                            ? const SizedBox(
+                                width: 20,
+                                height: 20,
+                                child: CircularProgressIndicator(
+                                    color: Colors.white, strokeWidth: 2))
+                            : Text(
+                                isLogin ? 'Giriş Yap' : 'Hesap Oluştur',
+                                style: const TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.bold),
+                              ),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    TextButton(
+                      onPressed: () {
+                        setState(() {
+                          isLogin = !isLogin;
+                          _errorMessage = null;
+                        });
+                      },
+                      child: Text(
+                        isLogin
+                            ? 'Hesabınız yok mu? Kayıt Olun'
+                            : 'Zaten hesabınız var mı? Giriş Yapın',
+                        style: const TextStyle(fontSize: 13),
+                      ),
+                    ),
+                    const Divider(height: 24),
+                    TextButton.icon(
+                      icon: const Icon(Icons.shield_outlined, size: 16),
+                      label: const Text(
+                          'Aydınlatma Metni & Gizlilik Politikası',
+                          style: TextStyle(fontSize: 11)),
+                      onPressed: () {
+                        showDialog(
+                          context: context,
+                          builder: (dialogContext) {
+                            return AlertDialog(
+                              shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(20)),
+                              title: const Text('Gizlilik ve Güvenlik 🛡️',
+                                  style: TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 16)),
+                              content: const SingleChildScrollView(
+                                child: Text(
+                                  'WeeklyPulse, haftalık görevlerinizi, akademik veya kurumsal planlarınızı cihazınız ve güvenli Supabase altyapısı arasında uçtan uca eşitler.\n\n'
+                                  '• Verileriniz yalnızca size aittir ve üçüncü taraflarla paylaşılmaz.\n'
+                                  '• Takvim entegrasyonu yalnızca görev saatlerinizi senkronize etmek için kullanılır.\n'
+                                  '• Hesabınızı dilediğiniz zaman profil ekranından şifrenizle doğrulayarak tüm verilerinizle birlikte kalıcı olarak silebilirsiniz.',
+                                  style: TextStyle(fontSize: 13, height: 1.4),
+                                ),
+                              ),
+                              actions: [
+                                TextButton(
+                                  onPressed: () => Navigator.pop(dialogContext),
+                                  child: const Text('Kapat'),
+                                ),
+                              ],
+                            );
+                          },
+                        );
+                      },
+                    ),
+                  ],
                 ),
               ),
-              const SizedBox(height: 12),
-              TextButton(
-                onPressed: () {
-                  setState(() {
-                    _isSignUp = !_isSignUp;
-                    _errorMessage = null;
-                  });
-                },
-                child: Text(
-                  _isSignUp
-                      ? 'Zaten hesabınız var mı? Giriş yapın'
-                      : 'Hesabınız yok mu? Hemen kaydolun',
-                  style: const TextStyle(fontSize: 13, color: Colors.blueGrey),
-                ),
-              ),
-              const SizedBox(height: 16),
-              GestureDetector(
-                onTap: () => LegalModal.showPrivacyPolicy(context),
-                child: const Text(
-                  'Kullanım Şartları ve Gizlilik Politikası (KVKK)',
-                  style: TextStyle(
-                    fontSize: 11,
-                    color: Colors.grey,
-                    decoration: TextDecoration.underline,
-                  ),
-                ),
-              ),
-            ],
+            ),
           ),
         ),
       ),

@@ -5825,7 +5825,7 @@ on:
 
 jobs:
   quality_check:
-    name: Code Analysis, Test Coverage & Build Gate
+    name: Code Analysis, Test Coverage & Native Release Build
     runs-on: ubuntu-latest
 
     steps:
@@ -5851,14 +5851,14 @@ jobs:
       - name: Verify Code Formatting
         run: dart format --output=none --set-exit-if-changed .
 
-      - name: Run Static Code Analysis (Linter Zero-Tolerance)
+      - name: Run Static Code Analysis (Zero-Tolerance)
         run: flutter analyze --fatal-infos --fatal-warnings
 
       - name: Execute Unit & Regression Test Suite
         run: flutter test --coverage
 
-      - name: Verify Quality Gate Passed
-        run: echo "Quality Gate Passed: Zero compilation errors, zero warnings."
+      - name: Build Android Release APK (Verification Gate)
+        run: flutter build apk --release
 
 
 -- WeeklyPulse Canonical Production Migration v20

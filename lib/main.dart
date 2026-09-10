@@ -9,7 +9,6 @@ import 'presentation/screens/weekly_planner_screen.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // P0: Global Crash Reporting & Error Boundary
   FlutterError.onError = (FlutterErrorDetails details) {
     FlutterError.presentError(details);
     debugPrint('🚨 [CRASH-LOG - FlutterError]: ${details.exceptionAsString()}');
@@ -22,12 +21,13 @@ void main() async {
     return true;
   };
 
+  // ignore: deprecated_member_use
   await Supabase.initialize(
     url: supabaseUrl,
+    // ignore: deprecated_member_use
     anonKey: supabaseAnonKey,
   );
 
-  // Tekil Notification Başlatma
   await NotificationService.initialize();
 
   runApp(const WeeklyPulseApp());

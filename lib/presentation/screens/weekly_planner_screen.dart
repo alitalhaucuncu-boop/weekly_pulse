@@ -61,7 +61,6 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
   String? _taskFetchError;
   final Set<String> _movingTaskIds = <String>{};
 
-  // P1: Fetch Race Condition Koruması için sayaç
   int _fetchGeneration = 0;
 
   late DateTime currentWeekMonday;
@@ -1662,7 +1661,6 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                       ),
                     ),
                     const SizedBox(height: 16),
-                    // P1: onChanged ile manuel klavye düzenlemesi anında yeniden ayrıştırılır
                     TextField(
                       controller: speechController,
                       maxLines: 2,
@@ -2534,7 +2532,6 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                     Duration(days: targetDate.weekday - 1));
                                 final derivedDayIndex = targetDate.weekday - 1;
 
-                                // P0: Client Request ID oluşturuluyor (Idempotent Create)
                                 final randomSuffix = Random()
                                     .nextInt(999999)
                                     .toString()
@@ -2553,13 +2550,13 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                           _formatDateToKey(targetDate),
                                       'p_week_start_date':
                                           _formatDateToKey(derivedWeekStart),
-                                      'p_task_mode': activeMode,
                                       'p_task_time': formattedTime,
                                       'p_duration_minutes': selectedDuration,
                                       'p_priority': selectedPriority,
                                       'p_deadline':
                                           selectedDeadline?.toIso8601String(),
                                       'p_reminder_time': selectedReminder,
+                                      'p_task_mode': activeMode,
                                       'p_request_id': clientRequestId,
                                     },
                                   );
@@ -2583,19 +2580,36 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                   _fetchTasks();
                                   _fetchAllTasksForMonth(focusedCalendarDay);
 
-                                  TaskSyncCoordinator.coordinateTaskSync(
+                                  // P1 FIX: Await edilerek tam senkronizasyon sonucu kullanıcıya gösterilir
+                                  final syncResult = await TaskSyncCoordinator
+                                      .coordinateTaskSync(
                                     task: createdTask,
                                     targetDate: targetDate,
                                   );
 
                                   if (mounted) {
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      const SnackBar(
-                                        content:
-                                            Text('✨ Görev başarıyla eklendi!'),
-                                        backgroundColor: Colors.green,
-                                      ),
-                                    );
+                                    if (syncResult.isFullySynced) {
+                                      ScaffoldMessenger.of(context)
+                                          .showSnackBar(
+                                        const SnackBar(
+                                          content: Text(
+                                              '✨ Görev eklendi ve eşitlendi!'),
+                                          backgroundColor: Colors.green,
+                                        ),
+                                      );
+                                    } else {
+                                      final msg =
+                                          syncResult.effectiveUserMessage ??
+                                              'Senkronizasyon tamamlanamadı.';
+                                      ScaffoldMessenger.of(context)
+                                          .showSnackBar(
+                                        SnackBar(
+                                          content:
+                                              Text('⚠️ Görev eklendi: $msg'),
+                                          backgroundColor: Colors.orange,
+                                        ),
+                                      );
+                                    }
                                   }
                                 } catch (e) {
                                   debugPrint("Görev Ekleme Hatası: $e");
@@ -2630,7 +2644,6 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
     });
   }
 
-  // P1: Fetch Race Condition Koruması
   Future<void> _fetchTasks() async {
     final int generation = ++_fetchGeneration;
     final String targetWeekKey = _formatDateToKey(currentWeekMonday);
@@ -2653,7 +2666,6 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
           .order('scheduled_date', ascending: true)
           .order('task_time', ascending: true);
 
-      // Eğer kullanıcı başka bir haftaya tıkladıysa eski cevabı yoksay
       if (generation != _fetchGeneration) {
         return;
       }
@@ -2952,7 +2964,8 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
         } else {
           final targetDate =
               DateTime.tryParse(task.scheduledDate ?? '') ?? DateTime.now();
-          TaskSyncCoordinator.coordinateTaskSync(
+          // P1 FIX: Await edilerek arka plan senkronizasyonu tamamlanır
+          await TaskSyncCoordinator.coordinateTaskSync(
             task: task,
             targetDate: targetDate,
           );
