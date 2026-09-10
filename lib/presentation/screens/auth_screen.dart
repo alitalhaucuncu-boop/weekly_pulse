@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../core/constants.dart';
-import 'weekly_planner_screen.dart';
 
 class AuthScreen extends StatefulWidget {
   final bool isDark;
@@ -131,7 +130,6 @@ class _AuthScreenState extends State<AuthScreen> {
 
   void _handleAuth() async {
     final email = _emailController.text.trim();
-    // AUD-029: Şifre alanında trim yapılmaz, geçerli sınır boşlukları korunur
     final password = _passwordController.text;
 
     if (email.isEmpty || password.isEmpty) {
@@ -147,25 +145,14 @@ class _AuthScreenState extends State<AuthScreen> {
     });
 
     final scaffoldMessenger = ScaffoldMessenger.of(context);
-    final nav = Navigator.of(context);
 
     try {
       if (isLogin) {
-        final res = await supabase.auth.signInWithPassword(
+        await supabase.auth.signInWithPassword(
           email: email,
           password: password,
         );
-
-        if (res.session != null && mounted) {
-          nav.pushReplacement(
-            MaterialPageRoute(
-              builder: (_) => WeeklyPlannerScreen(
-                isDark: widget.isDark,
-                onThemeToggle: widget.onThemeToggle,
-              ),
-            ),
-          );
-        }
+        // AUD-012 FIX: Manuel pushReplacement kaldırıldı; main.dart'taki StreamBuilder oturumu yakalayıp Planner'a yönlendirir.
       } else {
         final res = await supabase.auth.signUp(
           email: email,
@@ -189,17 +176,7 @@ class _AuthScreenState extends State<AuthScreen> {
           }
           return;
         }
-
-        if (res.session != null && mounted) {
-          nav.pushReplacement(
-            MaterialPageRoute(
-              builder: (_) => WeeklyPlannerScreen(
-                isDark: widget.isDark,
-                onThemeToggle: widget.onThemeToggle,
-              ),
-            ),
-          );
-        }
+        // Session geldiyse yine StreamBuilder tetiklenir.
       }
     } on AuthException catch (e) {
       if (mounted) {
