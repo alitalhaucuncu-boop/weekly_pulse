@@ -1,4 +1,4 @@
--- WeeklyPulse Canonical Production Migration v30 (Full Inventory & Parity)
+-- WeeklyPulse Canonical Production Migration v31 (Full Inventory & Parity)
 CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
 
 CREATE TABLE IF NOT EXISTS public.profiles (
@@ -536,8 +536,9 @@ BEGIN
 
     IF v_expected_event_id IS NULL OR v_expected_event_id = '' THEN
         v_is_calendar_verified := true;
-    ELSIF p_calendar_status IN ('provider_verified', 'provider_not_found') 
-          AND (p_verified_event_id = v_expected_event_id OR p_verified_event_id = 'not_found') THEN
+    ELSIF p_calendar_status = 'provider_verified' AND p_verified_event_id = v_expected_event_id THEN
+        v_is_calendar_verified := true;
+    ELSIF p_calendar_status = 'provider_not_found' AND p_verified_event_id = 'not_found' THEN
         v_is_calendar_verified := true;
     ELSE
         v_is_calendar_verified := false;
@@ -657,12 +658,33 @@ DECLARE
     v_profile record;
     v_new_task record;
     v_clean_title text;
+    v_existing_op record;
     v_task_start timestamptz;
     v_task_end timestamptz;
 BEGIN
     v_user_id := auth.uid();
     IF v_user_id IS NULL THEN
         RETURN jsonb_build_object('success', false, 'code', 'UNAUTHORIZED', 'message', 'Oturum bulunamadı.');
+    END IF;
+
+    IF p_request_id IS NOT NULL AND trim(p_request_id) <> '' THEN
+        SELECT * INTO v_existing_op 
+        FROM public.sync_operations 
+        WHERE user_id = v_user_id AND idempotency_key = p_request_id;
+
+        IF FOUND THEN
+            SELECT * INTO v_new_task 
+            FROM public.weekly_tasks 
+            WHERE id = v_existing_op.task_id AND user_id = v_user_id;
+
+            IF FOUND THEN
+                RETURN jsonb_build_object(
+                    'success', true,
+                    'task', to_jsonb(v_new_task),
+                    'idempotent_replay', true
+                );
+            END IF;
+        END IF;
     END IF;
 
     v_clean_title := trim(coalesce(p_title, ''));
@@ -702,16 +724,14 @@ BEGIN
         END;
     END IF;
 
+    INSERT INTO public.profiles (id, email)
+    VALUES (v_user_id, auth.jwt()->>'email')
+    ON CONFLICT (id) DO NOTHING;
+
     SELECT * INTO v_profile
     FROM public.profiles
     WHERE id = v_user_id
     FOR UPDATE;
-
-    IF NOT FOUND THEN
-        INSERT INTO public.profiles (id, email)
-        VALUES (v_user_id, auth.jwt()->>'email')
-        RETURNING * INTO v_profile;
-    END IF;
 
     IF coalesce(v_profile.is_premium, false) = false AND coalesce(v_profile.voice_command_usage, 0) >= 3 THEN
         RETURN jsonb_build_object(

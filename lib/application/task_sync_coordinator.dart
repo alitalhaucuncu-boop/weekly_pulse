@@ -76,8 +76,14 @@ class TaskSyncCoordinator {
 
       if (task.isCompleted) {
         if (externalCalId != null && externalEventId != null) {
-          await CalendarService.deleteEvent(externalCalId, externalEventId);
-          externalEventId = null;
+          final delRes =
+              await CalendarService.deleteEvent(externalCalId, externalEventId);
+          if (delRes.isSuccess || delRes.isNotFound) {
+            externalEventId = null;
+          } else {
+            calSuccess = false;
+            calMsg = delRes.message ?? 'Tamamlanan görev takvimden silinemedi.';
+          }
         }
       } else {
         final calId = await CalendarService.getDefaultCalendarId();
@@ -108,7 +114,6 @@ class TaskSyncCoordinator {
         final user = supabase.auth.currentUser;
         if (user != null) {
           final newStatus = (notifSuccess && calSuccess) ? 'synced' : 'partial';
-          // AUD-017 FIX: Version guard ile stale metadata ezilmesi önlendi
           await supabase
               .from('weekly_tasks')
               .update({
@@ -172,12 +177,15 @@ class TaskSyncCoordinator {
           String calStatus = 'skipped';
           String? verifiedEventId;
           if (calId != null && calEventId != null) {
-            final deleted = await CalendarService.deleteEvent(
+            final delRes = await CalendarService.deleteEvent(
                 calId.toString(), calEventId.toString());
-            // AUD-001 FIX: Silme başarısızsa provider_not_found yerine failed gönderilir
-            if (deleted) {
+            // AUD-001-V23 FIX: Typed result eşleştirmesi
+            if (delRes.isSuccess) {
               calStatus = 'provider_verified';
               verifiedEventId = calEventId.toString();
+            } else if (delRes.isNotFound) {
+              calStatus = 'provider_not_found';
+              verifiedEventId = 'not_found';
             } else {
               calStatus = 'failed';
               verifiedEventId = null;
@@ -194,7 +202,7 @@ class TaskSyncCoordinator {
               'p_verified_event_id': verifiedEventId,
             });
 
-            // AUD-002 FIX: Yalnızca sunucu completed döndüğünde reconciled say
+            // AUD-002-V23 FIX: Sadece sunucunun completed kabul ettiği işlemler başarı sayılır
             if (reportRes is Map &&
                 reportRes['success'] == true &&
                 reportRes['status'] == 'completed') {

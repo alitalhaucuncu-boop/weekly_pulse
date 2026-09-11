@@ -194,6 +194,7 @@ class NotificationService {
   static Future<void> scheduleWeeklyReportNotification({
     required String userTierName,
   }) async {
+    // WP-008 FIX: Ücretsiz kullanıcıları da kapsayacak şekilde Pazar akşamı 20:00'ye zamanlanmış haftalık bildirim
     try {
       final now = DateTime.now();
       int daysUntilSunday = (DateTime.sunday - now.weekday) % 7;
@@ -220,8 +221,8 @@ class NotificationService {
 
       await _notificationsPlugin.zonedSchedule(
         99999,
-        'Haftalık Zeka Raporun Hazır! 📊',
-        'Geçen haftanın analizi tamamlandı. Yeni haftanı dengelemek için dokun.',
+        'Haftalık Planlama Raporun Hazır! 📊',
+        'Bu haftaki performansın ve zaman dengen incelendi. Yeni haftayı planlamak için dokun.',
         tzScheduled,
         platformDetails,
         androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,

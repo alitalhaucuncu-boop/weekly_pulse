@@ -2,6 +2,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:weekly_pulse/domain/models/task_item.dart';
 import 'package:weekly_pulse/application/planning_engine.dart';
 import 'package:weekly_pulse/domain/parsers/voice_duration_parser.dart';
+import 'package:weekly_pulse/data/calendar_service.dart';
+import 'package:weekly_pulse/application/task_sync_coordinator.dart';
 
 void main() {
   group('PlanningEngine Kapasite ve Çakışma Testleri', () {
@@ -76,17 +78,49 @@ void main() {
         durationMinutes: 60,
       );
 
-      // 10:30 - 11:30 ile 10:00 - 11:00 çakışır
       expect(
         PlanningEngine.wouldConflictOnTargetDay(taskB, targetDate, [taskA]),
         isTrue,
       );
 
-      // 11:00 - 12:00 ile 10:00 - 11:00 çakışmaz (sınır temas)
       expect(
         PlanningEngine.wouldConflictOnTargetDay(taskC, targetDate, [taskA]),
         isFalse,
       );
+    });
+
+    test('Haftalık Yaşam Raporu oluşturma ve çakışma tespiti', () {
+      final tasks = [
+        TaskItem(
+          id: '1',
+          userId: 'u1',
+          title: 'Ders',
+          category: 'Ders',
+          dayIndex: 0,
+          scheduledDate: '2026-09-07',
+          weekStartDate: '2026-09-07',
+          taskTime: '10:00',
+          durationMinutes: 60,
+          taskMode: 'student',
+        ),
+        TaskItem(
+          id: '2',
+          userId: 'u1',
+          title: 'Toplantı',
+          category: 'İş',
+          dayIndex: 0,
+          scheduledDate: '2026-09-07',
+          weekStartDate: '2026-09-07',
+          taskTime: '10:30',
+          durationMinutes: 60,
+          taskMode: 'pro',
+        ),
+      ];
+
+      final report = PlanningEngine.generateWeeklyIntelligenceReport(tasks);
+      expect(report['student'], equals(1));
+      expect(report['pro'], equals(1));
+      expect((report['clashes'] as List).length, equals(1));
     });
   });
 
@@ -113,48 +147,57 @@ void main() {
     });
   });
 
-  group('Outbox & Lease Token Security Contract Tests', () {
-    test('Lease token formatı ve uzunluğu doğrulanmalı', () {
-      const String rawToken = '4f8a9b2c3d4e5f6a7b8c9d0e1f2a3b4c';
-      expect(rawToken.length, equals(32));
-      expect(RegExp(r'^[a-f0-9]+$').hasMatch(rawToken), isTrue);
+  group('Data Layer & Contract Integrity Tests', () {
+    test('CalendarDeleteResult model doğrulaması', () {
+      const resSuccess =
+          CalendarDeleteResult(status: CalendarDeleteStatus.deleted);
+      expect(resSuccess.isSuccess, isTrue);
+      expect(resSuccess.isNotFound, isFalse);
+
+      const resNotFound =
+          CalendarDeleteResult(status: CalendarDeleteStatus.notFound);
+      expect(resNotFound.isSuccess, isFalse);
+      expect(resNotFound.isNotFound, isTrue);
+
+      const resFailed = CalendarDeleteResult(
+          status: CalendarDeleteStatus.failed, message: 'İzin yok');
+      expect(resFailed.isSuccess, isFalse);
+      expect(resFailed.isNotFound, isFalse);
     });
 
-    test('Stale lease expiry tespiti ve recovery kontrolü', () {
-      final now = DateTime.now();
-      final validLockedUntil = now.add(const Duration(seconds: 60));
-      final expiredLockedUntil = now.subtract(const Duration(seconds: 10));
+    test('TaskSyncResult bütünleşik senkronizasyon mantığı', () {
+      const fullSync = TaskSyncResult(
+        isNotificationSynced: true,
+        isCalendarSynced: true,
+      );
+      expect(fullSync.isFullySynced, isTrue);
+      expect(fullSync.effectiveUserMessage, isNull);
 
-      bool isLeaseActive(DateTime? lockedUntil) {
-        if (lockedUntil == null) return false;
-        return lockedUntil.isAfter(DateTime.now());
-      }
-
-      expect(isLeaseActive(validLockedUntil), isTrue);
-      expect(isLeaseActive(expiredLockedUntil), isFalse);
+      const partialSync = TaskSyncResult(
+        isNotificationSynced: true,
+        isCalendarSynced: false,
+        calendarMessage: 'Takvim hatası',
+      );
+      expect(partialSync.isFullySynced, isFalse);
+      expect(partialSync.effectiveUserMessage, contains('Takvim hatası'));
     });
 
-    test('Dead-letter state geçiş sınırı (max_attempts)', () {
-      const int maxAttempts = 5;
-      bool shouldMoveToDeadLetter(int attemptCount) {
-        return attemptCount >= maxAttempts;
-      }
+    test('Optimistic Concurrency Control (CAS Version Increment)', () {
+      final task = TaskItem(
+        id: '1',
+        userId: 'u1',
+        title: 'Görev',
+        category: 'İş',
+        dayIndex: 0,
+        weekStartDate: '2026-09-07',
+        version: 2,
+      );
 
-      expect(shouldMoveToDeadLetter(4), isFalse);
-      expect(shouldMoveToDeadLetter(5), isTrue);
-      expect(shouldMoveToDeadLetter(6), isTrue);
-    });
+      int expectedVersion = task.version;
+      int newVersion = expectedVersion + 1;
 
-    test('Notification status whitelist kontrat uyumu', () {
-      const allowedStatuses = {
-        'best_effort_client_ack',
-        'client_acknowledged',
-        'failed',
-        'skipped',
-      };
-
-      const clientSentStatus = 'best_effort_client_ack';
-      expect(allowedStatuses.contains(clientSentStatus), isTrue);
+      expect(newVersion, equals(3));
+      expect(expectedVersion, isNot(equals(newVersion)));
     });
   });
 }

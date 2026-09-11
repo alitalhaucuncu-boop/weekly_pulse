@@ -235,10 +235,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
           aiUsage = syncRes['ai_usage'] ?? 0;
         });
 
-        if (isUserPremium) {
-          NotificationService.scheduleWeeklyReportNotification(
-              userTierName: userTierName);
-        }
+        // WP-008: Ücretsiz kullanıcılar da dahil haftalık özet kurulur
+        NotificationService.scheduleWeeklyReportNotification(
+            userTierName: userTierName);
       }
     } catch (e) {
       debugPrint("Profil Senkronizasyon Hatası: $e");
@@ -341,7 +340,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
             children: [
               Icon(Icons.balance, color: Colors.deepPurple, size: 26),
               SizedBox(width: 8),
-              Text('Akıllı Hafta Dengeleyici ⚖️',
+              Text('Hafta Dengeleyici ⚖️',
                   style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
             ],
           ),
@@ -350,7 +349,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                '${fullWeekDays[busiestDay]} günü çok yoğun (%$maxScore Yük).',
+                '${fullWeekDays[busiestDay]} günü yoğun (%$maxScore Kapasite).',
                 style: const TextStyle(
                     fontWeight: FontWeight.bold,
                     color: Colors.redAccent,
@@ -481,7 +480,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                               child: Text(
                                 isUserPremium
                                     ? '👑 $userTierName Üyesi ($userPlanId)'
-                                    : 'Ücretsiz Plan (Free)',
+                                    : 'Standart Plan',
                                 style: const TextStyle(
                                     color: Colors.white,
                                     fontSize: 11,
@@ -531,7 +530,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                         Row(
                           mainAxisAlignment: MainAxisAlignment.spaceBetween,
                           children: [
-                            const Text('🤖 Akıllı Analiz Raporu:'),
+                            const Text('📊 Haftalık Denge Raporu:'),
                             Text(
                               isUserPremium
                                   ? 'Sınırsız ♾️'
@@ -724,19 +723,22 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                           }
 
                           try {
+                            // WP-013 FIX: External calendar delete adımlarını Future.wait ile paralel yürüt
                             try {
                               final dynamic calEventsRes = await supabase
                                   .rpc('get_all_user_calendar_events');
                               if (calEventsRes is List) {
-                                for (var ev in calEventsRes) {
+                                final deleteFutures = calEventsRes.map((ev) {
                                   final cid = ev['calendar_id']?.toString();
                                   final ceid =
                                       ev['calendar_event_id']?.toString();
                                   if (cid != null && ceid != null) {
-                                    await CalendarService.deleteEvent(
+                                    return CalendarService.deleteEvent(
                                         cid, ceid);
                                   }
-                                }
+                                  return Future.value(null);
+                                });
+                                await Future.wait(deleteFutures);
                               }
                             } catch (_) {}
 
@@ -910,9 +912,9 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
         final message = (quotaRes is Map) ? quotaRes['message'] : null;
         if (mounted) {
           _showLimitExceededDialog(
-            title: 'Haftalık Akıllı Analiz Hakkın Doldu! 🤖',
+            title: 'Haftalık Analiz Hakkın Doldu! 📊',
             message: message ??
-                'Ücretsiz sürümde haftada 1 kez Akıllı Analiz alabilirsin.',
+                'Ücretsiz sürümde haftada 1 kez plan analizi alabilirsin.',
           );
         }
         return;
@@ -974,14 +976,13 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                 children: [
                   Row(
                     children: [
-                      const Icon(Icons.auto_awesome,
-                          color: Colors.amber, size: 30),
+                      const Icon(Icons.insights, color: Colors.amber, size: 30),
                       const SizedBox(width: 10),
                       Expanded(
                         child: Text(
                           isUserPremium
-                              ? '👑 Weekly Intelligence VIP Raporu'
-                              : '🤖 WeeklyPulse Bütünsel Yük Analizi',
+                              ? '👑 VIP Haftalık Yaşam ve Denge Analizi'
+                              : '📊 WeeklyPulse Bütünsel Yük Analizi',
                           style: const TextStyle(
                               fontSize: 17, fontWeight: FontWeight.bold),
                         ),
@@ -1063,7 +1064,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                               Icon(Icons.warning_amber_rounded,
                                   color: Colors.redAccent, size: 18),
                               SizedBox(width: 6),
-                              Text('Haftalık Gerçek Zaman Çakışmaları:',
+                              Text('Haftalık Zaman Çakışmaları:',
                                   style: TextStyle(
                                       fontWeight: FontWeight.bold,
                                       fontSize: 12,
@@ -1099,10 +1100,10 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                       children: [
                         const Row(
                           children: [
-                            Icon(Icons.insights,
+                            Icon(Icons.rule,
                                 size: 18, color: Color(0xFF7895CB)),
                             SizedBox(width: 6),
-                            Text('Haftalık Zeka Analiz Tavsiyeleri:',
+                            Text('Haftalık Denge Önerileri:',
                                 style: TextStyle(
                                     fontWeight: FontWeight.bold, fontSize: 13)),
                           ],
@@ -1139,7 +1140,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
         },
       );
     } catch (e) {
-      debugPrint("Genel AI Analiz Hatası: $e");
+      debugPrint("Genel Analiz Hatası: $e");
       if (mounted) {
         scaffoldMessenger.showSnackBar(
           SnackBar(content: Text('Hata: $e')),
@@ -2622,6 +2623,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                 }
 
                 if (dbDeleteSuccess) {
+                  bool externalCleanupOk = true;
                   try {
                     final int notifIdToCancel =
                         NotificationService.resolveNotificationId(task: task);
@@ -2630,11 +2632,35 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
 
                     if (task.calendarId != null &&
                         task.calendarEventId != null) {
-                      await CalendarService.deleteEvent(
+                      final delRes = await CalendarService.deleteEvent(
                           task.calendarId!, task.calendarEventId!);
+                      if (!delRes.isSuccess && !delRes.isNotFound) {
+                        externalCleanupOk = false;
+                      }
                     }
                   } catch (e) {
                     debugPrint("İstemci Temizleme Hatası: $e");
+                    externalCleanupOk = false;
+                  }
+
+                  if (mounted) {
+                    if (externalCleanupOk) {
+                      scaffoldMessenger.showSnackBar(
+                        const SnackBar(
+                          content: Text(
+                              '✨ Görev ve takvim kaydı başarıyla silindi.'),
+                          backgroundColor: Colors.green,
+                        ),
+                      );
+                    } else {
+                      scaffoldMessenger.showSnackBar(
+                        const SnackBar(
+                          content: Text(
+                              '⚠️ Görev silindi. Dış takvim temizliği arka planda tamamlanacak.'),
+                          backgroundColor: Colors.orange,
+                        ),
+                      );
+                    }
                   }
                 }
               },
@@ -2834,6 +2860,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
         icon: const Icon(Icons.add, color: Colors.white),
         label: Text(isStudent ? 'Plan Ekle' : 'Görev Ekle',
             style: const TextStyle(color: Colors.white)),
+        tooltip: 'Yeni Plan Ekle',
       ),
       body: _isLoadingTasks
           ? const Center(child: CircularProgressIndicator())
@@ -2863,6 +2890,33 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                 )
               : Column(
                   children: [
+                    // WP-007 FIX: Yeni kullanıcılar için ilk keşif yönlendirme kartı
+                    if (allFetchedTasks.isEmpty &&
+                        currentViewMode == ViewMode.daily)
+                      Container(
+                        margin: const EdgeInsets.symmetric(
+                            horizontal: 16, vertical: 4),
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: primaryColor.withValues(alpha: 0.08),
+                          borderRadius: BorderRadius.circular(14),
+                          border: Border.all(
+                              color: primaryColor.withValues(alpha: 0.2)),
+                        ),
+                        child: Row(
+                          children: [
+                            Icon(Icons.lightbulb_outline,
+                                color: primaryColor, size: 24),
+                            const SizedBox(width: 8),
+                            const Expanded(
+                              child: Text(
+                                'Hoş Geldin! "+" butonundan ilk planını ekleyebilir veya mikrofona basarak konuşarak kaydedebilirsin.',
+                                style: TextStyle(fontSize: 12),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
                     Container(
                       margin: const EdgeInsets.symmetric(
                           horizontal: 16, vertical: 4),
@@ -3027,7 +3081,7 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                         : Icon(
                                             isUserPremium
                                                 ? Icons.stars
-                                                : Icons.auto_awesome,
+                                                : Icons.insights,
                                             color: Colors.amber,
                                             size: 26),
                                     const SizedBox(width: 8),
@@ -3036,8 +3090,8 @@ class _WeeklyPlannerScreenState extends State<WeeklyPlannerScreen> {
                                         _isAIAnalyzing
                                             ? 'Analiz Ediliyor...'
                                             : (isUserPremium
-                                                ? 'Weekly Intelligence VIP'
-                                                : 'Akıllı Haftalık Yaşam Raporu'),
+                                                ? 'VIP Haftalık Yaşam Raporu'
+                                                : 'Haftalık Denge Analizi'),
                                         style: const TextStyle(
                                             color: Colors.white,
                                             fontWeight: FontWeight.bold,
@@ -3786,7 +3840,7 @@ class _VoiceInputBottomSheetState extends State<VoiceInputBottomSheet> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Text('Akıllı Sesli Asistan 🎙️',
+            const Text('Sesli Asistan 🎙️',
                 style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             if (_modalError != null) ...[
               const SizedBox(height: 8),
@@ -3897,7 +3951,6 @@ class _VoiceInputBottomSheetState extends State<VoiceInputBottomSheet> {
                               return;
                             }
 
-                            // Asenkron işlem öncesi Navigator referansını al
                             final nav = Navigator.of(context);
 
                             setState(() {

@@ -3,6 +3,22 @@ import 'package:device_calendar/device_calendar.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:timezone/timezone.dart' as tz;
 
+enum CalendarDeleteStatus {
+  deleted,
+  notFound,
+  failed,
+}
+
+class CalendarDeleteResult {
+  final CalendarDeleteStatus status;
+  final String? message;
+
+  const CalendarDeleteResult({required this.status, this.message});
+
+  bool get isSuccess => status == CalendarDeleteStatus.deleted;
+  bool get isNotFound => status == CalendarDeleteStatus.notFound;
+}
+
 class CalendarService {
   static final DeviceCalendarPlugin _plugin = DeviceCalendarPlugin();
 
@@ -84,7 +100,6 @@ class CalendarService {
             updateRes.data != null) {
           return updateRes.data;
         }
-        // WP-007 FIX: Güncelleme başarısız olduğunda hemen yeni kayıt açıp duplicate yapma.
         debugPrint(
             "Takvim güncelleme başarısız oldu, mükerrer kaydı önlemek için iptal edildi: ${updateRes?.errors.map((e) => e.errorMessage).toList()}");
         return null;
@@ -101,16 +116,43 @@ class CalendarService {
     }
   }
 
-  static Future<bool> deleteEvent(String calendarId, String eventId) async {
+  // AUD-001-V23 FIX: Typed result ile failed ve not_found ayrıştırıldı
+  static Future<CalendarDeleteResult> deleteEvent(
+      String calendarId, String eventId) async {
     try {
       final hasPerm = await requestPermissions();
-      if (!hasPerm) return false;
+      if (!hasPerm) {
+        return const CalendarDeleteResult(
+          status: CalendarDeleteStatus.failed,
+          message: 'Takvim izni verilmedi.',
+        );
+      }
 
       final res = await _plugin.deleteEvent(calendarId, eventId);
-      return res.isSuccess && (res.data ?? false);
+      if (res.isSuccess && (res.data ?? false)) {
+        return const CalendarDeleteResult(status: CalendarDeleteStatus.deleted);
+      }
+
+      final errors =
+          res.errors.map((e) => e.errorMessage.toLowerCase()).toList();
+      final bool isExplicitNotFound = errors.any(
+          (err) => err.contains('not found') || err.contains('bulunamadı'));
+
+      if (isExplicitNotFound) {
+        return const CalendarDeleteResult(
+            status: CalendarDeleteStatus.notFound);
+      }
+
+      return CalendarDeleteResult(
+        status: CalendarDeleteStatus.failed,
+        message: res.errors.map((e) => e.errorMessage).join(', '),
+      );
     } catch (e) {
       debugPrint("Takvim silme hatası: $e");
-      return false;
+      return CalendarDeleteResult(
+        status: CalendarDeleteStatus.failed,
+        message: e.toString(),
+      );
     }
   }
 }
